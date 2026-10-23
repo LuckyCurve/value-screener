@@ -249,6 +249,27 @@ func TestCancelWithNothingJudgedSaysSo(t *testing.T) {
 	}
 }
 
+// A run that fails part-way has still judged the stocks before the failure;
+// showing an empty page loses them.
+func TestAFailedRunStillShowsWhatItJudged(t *testing.T) {
+	a := newTestApp()
+	a.Screen = func(context.Context, config.Criteria, func(int, int, string)) (engine.Result, error) {
+		return sample(), errors.New("the data layer stopped: exit status 2")
+	}
+	a.Start()
+	a.Wait()
+	if a.Status() != statusFailed {
+		t.Fatalf("status %v", a.Status())
+	}
+	tt := ui.NewTester(a.View, 1280, 800)
+	if !tt.HasText("Could not run") {
+		t.Errorf("the failure should still be shown, texts %q", tt.Texts())
+	}
+	if !tt.HasText("Tencent") {
+		t.Errorf("the stocks judged before the failure should be shown, texts %q", tt.Texts())
+	}
+}
+
 func TestCancelSaysItIsStopping(t *testing.T) {
 	a := newTestApp()
 	release := make(chan struct{})
@@ -566,6 +587,45 @@ func TestTheDialogClosesAndCanBeOpenedForTheSameStockAgain(t *testing.T) {
 // A retry and a run both go through the same files in the data folder. A
 // run started while one is in flight would overwrite the other's codes and
 // figures, so it waits.
+// A retry moves a stock out of the missing group, so every row after it
+// shifts up. A dialog pinned to a row number would then describe whichever
+// stock took that row; it must follow the stock it was opened for.
+func TestTheDialogFollowsTheStockNotTheRow(t *testing.T) {
+	a := newTestApp()
+	a.Screen = func(context.Context, config.Criteria, func(int, int, string)) (engine.Result, error) {
+		r := withMissing()
+		r.Missing = append(r.Missing, engine.Verdict{
+			Stock:       engine.Stock{Code: "US.BRK.B", Name: "Berkshire", PE: 14},
+			Unavailable: "not covered",
+		})
+		return r, nil
+	}
+	release := make(chan struct{})
+	a.Retry = func(_ context.Context, _ config.Criteria, s engine.Stock) (engine.Verdict, error) {
+		<-release
+		return engine.Verdict{Stock: s, Passed: true}, nil
+	}
+	tt := ui.NewTester(a.View, 1280, 800)
+	runAndWait(t, tt)
+	if err := tt.Click("No data (2)"); err != nil {
+		t.Fatal(err)
+	}
+	// Open the dialog on the second row, then retry the first: the rows
+	// shift under the open dialog.
+	if err := tt.Click("US.BRK.B"); err != nil {
+		t.Fatal(err)
+	}
+	a.RetryStock("US.TCEHY")
+	close(release)
+	for i := 0; i < 100 && a.Retrying() != ""; i++ {
+		tt.Advance(10 * time.Millisecond)
+		tt.Frame()
+	}
+	if !tt.HasText("Berkshire") {
+		t.Errorf("the dialog should still describe the stock it was opened on, texts %q", tt.Texts())
+	}
+}
+
 func TestARunCannotStartWhileARetryIsInFlight(t *testing.T) {
 	a := newTestApp()
 	a.Screen = func(context.Context, config.Criteria, func(int, int, string)) (engine.Result, error) {

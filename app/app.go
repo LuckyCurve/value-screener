@@ -81,8 +81,10 @@ type App struct {
 	// chosen is the row picked in each table, -1 for none, kept apart so
 	// switching tabs keeps every choice.
 	chosen [3]int
-	// detail is 0 for no dialog, 1 for a stock's figures, 2 for a refusal.
-	detail int
+	// detail is 0 for no dialog, 1 for a stock's figures, 2 for a refusal,
+	// and detailCode is the stock it describes.
+	detail     int
+	detailCode string
 	// retrying is the code being fetched again, "" for none.
 	retrying string
 
@@ -271,7 +273,7 @@ func (a *App) Start() bool {
 	a.stopped, a.cancelling = false, false
 	a.mu.Unlock()
 	a.chosen = [3]int{-1, -1, -1}
-	a.detail, a.tab = 0, 0
+	a.detail, a.detailCode, a.tab = 0, "", 0
 
 	go a.run(ctx, cancel, c, done)
 	return true
@@ -902,40 +904,75 @@ func (a *App) openOnChoice(table ui.Element) {
 func (a *App) openDetail() {
 	a.mu.Lock()
 	r := a.result
-	tab, n := a.tab, a.chosen[a.tab]
+	code := a.chosenCode()
 	a.mu.Unlock()
-	if r == nil || n < 0 {
+	if r == nil || code == "" {
 		return
 	}
-	vs := rows(r, group(tab))
-	if n >= len(vs) {
+	v, ok := findVerdict(r, code)
+	if !ok {
 		return
 	}
+	a.detailCode = code
 	a.detail = 1
-	if vs[n].Unavailable != "" {
+	if v.Unavailable != "" {
 		a.detail = 2
 	}
+}
+
+// chosenCode is the code of the row picked in the tab on show, "" for none.
+//
+// The dialog follows a stock, not a row number: a retry moves a stock into
+// another group, and a dialog pinned to row 3 would then describe whatever
+// stock row 3 became.
+func (a *App) chosenCode() string {
+	row := a.chosen[a.tab]
+	if a.result == nil || row < 0 {
+		return ""
+	}
+	vs := rows(a.result, group(a.tab))
+	if row >= len(vs) {
+		return ""
+	}
+	return vs[row].Stock.Code
+}
+
+// findVerdict returns a stock's verdict from whichever group now holds it.
+func findVerdict(r *engine.Result, code string) (engine.Verdict, bool) {
+	if r == nil {
+		return engine.Verdict{}, false
+	}
+	for _, vs := range [][]engine.Verdict{r.Passed, r.Rejected, r.Missing} {
+		for _, v := range vs {
+			if v.Stock.Code == code {
+				return v, true
+			}
+		}
+	}
+	return engine.Verdict{}, false
 }
 
 // closeDetail closes the dialog and lets the same row be picked again.
 func (a *App) closeDetail() {
 	a.detail = 0
+	a.detailCode = ""
 	a.chosen[a.tab] = -1
 }
 
 // dialogs draws the dialog that may be open over the window.
 func (a *App) dialogs(c *ui.Context, t *ui.Theme) {
 	a.mu.Lock()
-	r, tab, n := a.result, a.tab, a.chosen[a.tab]
+	r, code := a.result, a.detailCode
 	a.mu.Unlock()
-	if a.detail == 0 || r == nil || n < 0 {
+	if a.detail == 0 || r == nil || code == "" {
 		return
 	}
-	vs := rows(r, group(tab))
-	if n >= len(vs) {
+	v, ok := findVerdict(r, code)
+	if !ok {
+		// The stock left the report, so there is nothing to describe.
+		a.closeDetail()
 		return
 	}
-	v := vs[n]
 
 	open := a.detail != 0
 	ui.Modal(c, &open, func() {
@@ -950,7 +987,7 @@ func (a *App) dialogs(c *ui.Context, t *ui.Theme) {
 		})
 	})
 	if !open {
-		a.detail = 0
+		a.detail, a.detailCode = 0, ""
 	}
 }
 
