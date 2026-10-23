@@ -11,8 +11,9 @@ import (
 // like the rest of the window while keeping minimize, maximize and close.
 const titleBarHeight = 40
 
-// titleBar draws that band: the app's name on the left, the window controls
-// on the right.
+// titleBar draws that band: a drag strip holding the window controls on the
+// right. The app's name and mark belong to the sidebar's header, one band
+// below; repeating them here reads as two headers stacked.
 func (a *App) titleBar(c *ui.Context, t *ui.Theme) {
 	bar := ui.Row(c).FillWidth().Height(titleBarHeight).
 		Padding(0, 4, 0, 10).Gap(8).AlignItems(ui.Center).
@@ -25,15 +26,7 @@ func (a *App) titleBar(c *ui.Context, t *ui.Theme) {
 	}
 
 	bar.Children(func() {
-		ui.Row(c).Gap(8).AlignItems(ui.Center).Grow(1).DragWindow().
-			Children(func() {
-				ui.Box(c).Size(20, 20).Radius(6).Background(t.Accent).
-					Center().Children(func() {
-					ui.Icon(c, iconLogo).FontSize(12).TextColor(t.AccentText)
-				})
-				ui.Text(c, "Value screen").FontSize(12).Bold().
-					TextColor(t.TextMuted)
-			})
+		ui.Row(c).Grow(1).DragWindow()
 		a.windowButtons(c, t)
 	})
 }

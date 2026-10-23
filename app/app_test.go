@@ -503,6 +503,20 @@ func TestTheDialogClosesAndCanBeOpenedForTheSameStockAgain(t *testing.T) {
 	}
 }
 
+func TestTheAppIsNamedOnce(t *testing.T) {
+	a := newTestApp()
+	tt := ui.NewTester(a.View, 1280, 800)
+	n := 0
+	for _, text := range tt.Texts() {
+		if text == "Value screen" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("the name should appear once, found %d times: %q", n, tt.Texts())
+	}
+}
+
 func TestTheTitleBarOffersTheWindowControls(t *testing.T) {
 	a := newTestApp()
 	tt := ui.NewTester(a.View, 1280, 800)
