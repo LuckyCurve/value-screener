@@ -47,16 +47,16 @@ type App struct {
 	// Screen is set by New to run the Python data layer and the engine.
 	Screen Screen
 
-	mu         sync.Mutex
-	status     Status
-	progress   int
-	total      int
-	message    string
-	elapsed    string
-	result     *engine.Result
-	running    bool
-	cancel     context.CancelFunc
-	done       chan struct{}
+	mu       sync.Mutex
+	status   Status
+	progress int
+	total    int
+	message  string
+	elapsed  string
+	result   *engine.Result
+	running  bool
+	cancel   context.CancelFunc
+	done     chan struct{}
 
 	// tab is 0 for passing stocks, 1 for rejected ones.
 	tab int
@@ -284,73 +284,163 @@ func (a *App) Wait() {
 	}
 }
 
+// invalidate asks for a frame. The services are read under the lock because
+// View stores them from the UI thread while a run may be calling this.
 func (a *App) invalidate() {
-	a.services.Invalidate()
+	a.mu.Lock()
+	s := a.services
+	a.mu.Unlock()
+	s.Invalidate()
 }
 
 // View draws the window.
 func (a *App) View(c *ui.Context) {
+	a.mu.Lock()
 	a.services = c.Services()
+	a.mu.Unlock()
 	t := c.Theme()
 
 	ui.Row(c).Fill().Children(func() {
-		ui.Column(c).Width(340).FillHeight().Padding(20).Gap(16).Children(func() {
-			ui.Text(c, "Value screen").FontSize(21).Bold()
-			ui.Text(c, "Rules every stock fetched is judged by.").
-				FontSize(12).TextColor(t.TextMuted)
+		ui.Column(c).Width(356).FillHeight().Padding(22, 18, 18, 18).
+			Background(t.Surface).Gap(18).Children(func() {
+			a.brand(c, t)
 			a.form(c, t)
 		})
-		ui.Box(c).Width(1).FillHeight().Background(t.Border)
-		ui.Column(c).Grow(1).FillHeight().Padding(20).Gap(12).Children(func() {
+		ui.Column(c).Grow(1).FillHeight().Padding(24, 20, 20, 20).Gap(16).Children(func() {
 			a.results(c, t)
 		})
 	})
 }
 
+// brand is the app's header: mark, name, and what it screens.
+func (a *App) brand(c *ui.Context, t *ui.Theme) {
+	ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
+		ui.Box(c).Size(34, 34).Radius(9).
+			Background(t.Accent).Center().Children(func() {
+			ui.Icon(c, iconLogo).FontSize(20).TextColor(t.AccentText)
+		})
+		ui.Column(c).Gap(0).Children(func() {
+			ui.Text(c, "Value screen").FontSize(16).Bold()
+			ui.Text(c, "HK · US · A-shares").FontSize(11).TextColor(t.TextMuted)
+		})
+	})
+}
+
+// section is a titled group, so the form reads as settings rather than a
+// wall of inputs.
+func section(c *ui.Context, t *ui.Theme, icon *ui.SVG, title string, fn func()) {
+	ui.Column(c).Gap(10).Children(func() {
+		ui.Row(c).Gap(7).AlignItems(ui.Center).Children(func() {
+			ui.Icon(c, icon).FontSize(14).TextColor(t.TextMuted)
+			ui.Text(c, title).FontSize(11).Bold().TextColor(t.TextMuted)
+		})
+		fn()
+	})
+}
+
+// card wraps content on a raised surface.
+func card(c *ui.Context, t *ui.Theme, radius float32, fn func()) {
+	ui.Box(c).FillWidth().Radius(radius).Background(t.Surface).
+		Border(1, t.Border).Padding(14).Children(fn)
+}
+
+// stat is one headline number with its label and mark.
+func stat(c *ui.Context, t *ui.Theme, label, value string, tint ui.Color, mark *ui.SVG) {
+	ui.Box(c).Width(150).Radius(10).Background(t.Surface).
+		Border(1, t.Border).Padding(12).Children(func() {
+		ui.Row(c).Gap(9).AlignItems(ui.Center).Children(func() {
+			ui.Icon(c, mark).FontSize(15).TextColor(tint)
+			ui.Column(c).Gap(0).Children(func() {
+				ui.Text(c, value).FontSize(17).Bold().TextColor(tint)
+				ui.Text(c, label).FontSize(10).TextColor(t.TextMuted)
+			})
+		})
+	})
+}
+
 func (a *App) form(c *ui.Context, t *ui.Theme) {
-	ui.Form(c, func() {
-		ui.Field(c, "PE ceiling", func() {
-			ui.NumberInput(c, &a.PE, 0.1, 500, 1)
-		})
-		ui.Field(c, "ROE floor (%)", func() {
-			ui.NumberInput(c, &a.ROEMin, 0.1, 200, 1)
-		})
-		ui.Field(c, "Years of ROE", func() {
-			ui.NumberInput(c, &a.ROEYears, 1, 30, 1)
-		})
-		ui.Field(c, "Years below floor", func() {
-			ui.NumberInput(c, &a.Slack, 0, 29, 1).
-				Tooltip("How many of those years may come in under the floor. " +
-					"Each one that does is named for the stock it let through.")
-		})
-		ui.Field(c, "Years of net cash", func() {
-			ui.NumberInput(c, &a.CashYrs, 1, 30, 1)
-		})
-		ui.Field(c, "PE history (years)", func() {
-			ui.Row(c).Gap(14).Children(func() {
-				for _, y := range []int{1, 3, 5, 10} {
-					ui.Radio(c, &a.Percenti, float64(y), fmt.Sprint(y))
-				}
-			}).Tooltip("How far back the percentile looks. It places today's PE " +
-				"among every daily PE of that window, so lower is cheaper. " +
-				"The comparison is with the stock's own history, not the market's.")
-		})
-		ui.Field(c, "Markets", func() {
-			ui.Column(c).Gap(6).Children(func() {
-				ui.Checkbox(c, &a.HK, "Hong Kong")
-				ui.Checkbox(c, &a.US, "United States")
-				ui.Checkbox(c, &a.CN, "A-shares")
+	ui.Scroll(c).Grow(1).Children(func() {
+		ui.Column(c).Gap(18).Children(func() {
+			section(c, t, iconRules, "VALUATION", func() {
+				ui.Form(c, func() {
+					ui.Field(c, "PE ceiling", func() {
+						ui.NumberInput(c, &a.PE, 0.1, 500, 1).
+							Tooltip("The highest trailing PE a stock may trade at. " +
+								"Loss-making stocks have no PE and are left out.")
+					})
+					ui.Field(c, "PE history", func() {
+						ui.Row(c).Gap(12).Children(func() {
+							for _, y := range []int{1, 3, 5, 10} {
+								ui.Radio(c, &a.Percenti, float64(y), fmt.Sprint(y))
+							}
+						}).Tooltip("How far back the percentile looks. It places today's " +
+							"PE among every daily PE of that window, so lower is cheaper. " +
+							"The comparison is with the stock's own history, not the market's.")
+					})
+				})
+			})
+
+			section(c, t, iconTrend, "QUALITY", func() {
+				ui.Form(c, func() {
+					ui.Field(c, "ROE floor (%)", func() {
+						ui.NumberInput(c, &a.ROEMin, 0.1, 200, 1)
+					})
+					ui.Field(c, "Over", func() {
+						ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
+							ui.NumberInput(c, &a.ROEYears, 1, 30, 1)
+							ui.Text(c, "years").FontSize(13).TextColor(t.TextMuted)
+						})
+					})
+					ui.Field(c, "Years may miss", func() {
+						ui.NumberInput(c, &a.Slack, 0, 29, 1).
+							Tooltip("How many of those years may come in under the floor. " +
+								"Each one that does is named for the stock it let through.")
+					})
+				})
+			})
+
+			section(c, t, iconCoins, "BALANCE SHEET", func() {
+				ui.Form(c, func() {
+					ui.Field(c, "Net cash over", func() {
+						ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
+							ui.NumberInput(c, &a.CashYrs, 1, 30, 1)
+							ui.Text(c, "years").FontSize(13).TextColor(t.TextMuted)
+						}).Tooltip("Cash must exceed interest-bearing debt in every one of " +
+							"these years. Debt here is borrowings, not payables.")
+					})
+				})
+			})
+
+			section(c, t, iconRows, "MARKETS", func() {
+				ui.Row(c).Gap(16).Children(func() {
+					ui.Checkbox(c, &a.HK, "Hong Kong")
+					ui.Checkbox(c, &a.US, "United States")
+					ui.Checkbox(c, &a.CN, "A-shares")
+				})
 			})
 		})
 	})
 
-	ui.Divider(c)
-
 	if a.IsRunning() {
-		if ui.Button(c, "Cancel").Clicked() {
+		btn := ui.Button(c, "").FillWidth().Children(func() {
+			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+				ui.Icon(c, iconStop).FontSize(15)
+				ui.Text(c, "Cancel").SingleLine()
+			})
+		})
+		if btn.Clicked() {
 			a.Cancel()
 		}
-	} else if ui.PrimaryButton(c, "Run screen").Clicked() {
+		return
+	}
+
+	btn := ui.PrimaryButton(c, "").FillWidth().Height(40).Children(func() {
+		ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+			ui.Icon(c, iconRun).FontSize(15).TextColor(t.AccentText)
+			ui.Text(c, "Run screen").Bold().TextColor(t.AccentText)
+		})
+	})
+	if btn.Clicked() {
 		a.Start()
 	}
 }
@@ -363,34 +453,57 @@ func (a *App) results(c *ui.Context, t *ui.Theme) {
 
 	switch status {
 	case statusRunning:
-		ui.Text(c, "Screening").FontSize(15).Bold()
-		v := float64(-1)
-		if total > 0 {
-			v = float64(progress) / float64(total)
-		}
-		ui.Progress(c, v).FillWidth()
-		label := "Asking OpenD for the first candidates"
-		if total > 0 {
-			label = fmt.Sprintf("%d of %d", progress, total)
-			if message != "" {
-				label += " · " + message
-			}
-		}
-		ui.Text(c, label).FontSize(13).TextColor(t.TextMuted)
+		card(c, t, 12, func() {
+			ui.Column(c).Gap(10).Children(func() {
+				ui.Row(c).Gap(9).AlignItems(ui.Center).Children(func() {
+					ui.Icon(c, iconClock).FontSize(16).TextColor(t.Accent)
+					ui.Text(c, "Screening").FontSize(14).Bold().Grow(1)
+					pct := "…"
+					if total > 0 {
+						pct = fmt.Sprintf("%d%%", progress*100/total)
+					}
+					ui.Text(c, pct).FontSize(13).TextColor(t.TextMuted)
+				})
+				v := float64(-1)
+				if total > 0 {
+					v = float64(progress) / float64(total)
+				}
+				ui.Progress(c, v).FillWidth()
+				label := "Asking OpenD for the first candidates"
+				if total > 0 {
+					label = fmt.Sprintf("%d of %d", progress, total)
+					if message != "" {
+						label += " · " + message
+					}
+				}
+				ui.Text(c, label).FontSize(12).TextColor(t.TextMuted)
+			})
+		})
 
 	case statusFailed:
-		ui.Text(c, "Could not run").FontSize(15).Bold()
-		ui.Text(c, message).FontSize(13).TextColor(t.Danger)
+		card(c, t, 12, func() {
+			ui.Row(c).Gap(10).AlignItems(ui.Start).Children(func() {
+				ui.Icon(c, iconCross).FontSize(16).TextColor(t.Danger)
+				ui.Column(c).Grow(1).Gap(3).Children(func() {
+					ui.Text(c, "Could not run").FontSize(14).Bold().TextColor(t.Danger)
+					ui.Text(c, message).FontSize(12).TextColor(t.TextMuted)
+				})
+			})
+		})
 
 	case statusFinished:
 		a.finished(c, t, result, elapsed)
 
 	default:
+		ui.Column(c).Fill().Center().Gap(10).Children(func() {
+			ui.Icon(c, iconInfo).FontSize(30).TextColor(t.TextMuted).Opacity(0.5)
+			ui.Text(c, "No screen run yet").FontSize(15).Bold()
+			ui.Text(c, "Set the rules on the left, then run the screen.").
+				FontSize(13).TextColor(t.TextMuted)
+		})
 		if message != "" {
-			ui.Text(c, message).FontSize(13).TextColor(t.Danger)
+			ui.Text(c, message).FontSize(12).TextColor(t.Danger)
 		}
-		ui.Text(c, "Set the rules on the left, then run the screen.").
-			FontSize(13).TextColor(t.TextMuted)
 	}
 }
 
@@ -398,11 +511,13 @@ func (a *App) finished(c *ui.Context, t *ui.Theme, r *engine.Result, elapsed str
 	if r == nil {
 		return
 	}
-	head := fmt.Sprintf("%d passed, %d rejected", len(r.Passed), len(r.Rejected))
-	if elapsed != "" {
-		head += " · " + elapsed
-	}
-	ui.Text(c, head).FontSize(16).Bold()
+	ui.Row(c).Gap(10).Children(func() {
+		stat(c, t, "Passed", fmt.Sprint(len(r.Passed)), t.Success, iconCheck)
+		stat(c, t, "Rejected", fmt.Sprint(len(r.Rejected)), t.TextMuted, iconCross)
+		if elapsed != "" {
+			stat(c, t, "Took", elapsed, t.TextMuted, iconClock)
+		}
+	})
 
 	ui.Tabs(c, &a.tab, fmt.Sprintf("Passed (%d)", len(r.Passed)),
 		fmt.Sprintf("Rejected (%d)", len(r.Rejected)))
@@ -455,7 +570,15 @@ func (a *App) passedTable(c *ui.Context, t *ui.Theme, r *engine.Result) {
 			if v.Valuation == nil {
 				ui.Text(c, "—").TextColor(t.TextMuted)
 			} else {
-				ui.Textf(c, "%.1f%%", v.Valuation.Percentile)
+				// Cheap against its own history is green, dear is red.
+				colour := t.Text
+				switch p := v.Valuation.Percentile; {
+				case p < 30:
+					colour = t.Success
+				case p > 70:
+					colour = t.Danger
+				}
+				ui.Textf(c, "%.1f%%", v.Valuation.Percentile).TextColor(colour)
 			}
 		case roe:
 			if lo, _, ok := engine.ROERange(v.ROE, r.Criteria.ROEYears); ok {
@@ -465,7 +588,7 @@ func (a *App) passedTable(c *ui.Context, t *ui.Theme, r *engine.Result) {
 			}
 		case cash:
 			if net, ok := engine.NetCashLowest(v.Balance, r.Criteria.CashYears); ok {
-				ui.Text(c, money(net))
+				ui.Text(c, money(net)).TextColor(netColour(t, net))
 			} else {
 				ui.Text(c, "—").TextColor(t.TextMuted)
 			}
@@ -517,55 +640,93 @@ func (a *App) detail(c *ui.Context, t *ui.Theme, r *engine.Result) {
 	}
 	v := vs[n]
 
-	ui.Divider(c)
-	ui.Row(c).Gap(18).AlignItems(ui.Center).Children(func() {
-		ui.Text(c, v.Stock.Name+"  "+v.Stock.Code).FontSize(14).Bold().Grow(1)
-		if v.Valuation != nil {
-			ui.Textf(c, "PE %.1f · %d-yr average %.1f", v.Stock.PE,
-				r.Criteria.PercentileYears, v.Valuation.Average).
-				FontSize(12).TextColor(t.TextMuted)
-		} else {
-			ui.Textf(c, "PE %.1f", v.Stock.PE).FontSize(12).TextColor(t.TextMuted)
-		}
-	})
-
-	if len(v.Failures) > 0 {
-		for _, f := range v.Failures {
-			ui.Text(c, "· "+f.Criterion+": "+f.Reason).FontSize(12).TextColor(t.Danger)
-		}
-	}
-	for _, note := range v.Notes {
-		ui.Text(c, "· "+note).FontSize(12).TextColor(t.TextMuted)
-	}
-
-	// Capped so the table below stays in view; the years scroll inside it.
-	ui.Scroll(c).Height(150).FillWidth().Children(func() {
-		years := make([]int, 0, len(v.ROE.ROE))
-		for y := range v.ROE.ROE {
-			years = append(years, y)
-		}
-		sort.Sort(sort.Reverse(sort.IntSlice(years)))
-		ui.Column(c).Gap(2).Children(func() {
-			for _, y := range years {
-				roe := v.ROE.ROE[y]
-				bal, ok := v.Balance.Years[y]
-				line := fmt.Sprintf("%d   ROE %5.1f%%", y, roe*100)
-				if ok {
-					line += fmt.Sprintf("   cash %s · debt %s · net %s",
-						money(bal.Cash), money(bal.Debt), money(bal.Cash-bal.Debt))
-					if net := bal.Cash - bal.Debt; net <= 0 {
-						ui.Text(c, line).FontSize(12).TextColor(t.Danger)
-						continue
-					}
+	card(c, t, 12, func() {
+		ui.Column(c).Gap(10).Children(func() {
+			ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
+				ui.Column(c).Grow(1).Gap(1).Children(func() {
+					ui.Text(c, v.Stock.Name).FontSize(15).Bold()
+					ui.Text(c, v.Stock.Code).FontSize(11).TextColor(t.TextMuted)
+				})
+				if v.Valuation != nil {
+					chip(c, t, fmt.Sprintf("PE %.1f", v.Stock.PE), t.TextMuted)
+					chip(c, t, fmt.Sprintf("%d-yr avg %.1f",
+						r.Criteria.PercentileYears, v.Valuation.Average), t.TextMuted)
+				} else {
+					chip(c, t, fmt.Sprintf("PE %.1f", v.Stock.PE), t.TextMuted)
 				}
-				colour := t.Text
-				if roe < r.Criteria.ROEMin {
-					colour = t.Warning
-				}
-				ui.Text(c, line).FontSize(12).TextColor(colour)
+			})
+
+			for _, f := range v.Failures {
+				ui.Row(c).Gap(6).AlignItems(ui.Start).Children(func() {
+					ui.Icon(c, iconCross).FontSize(12).TextColor(t.Danger)
+					ui.Text(c, f.Criterion+": "+f.Reason).FontSize(12).
+						TextColor(t.Danger).Grow(1)
+				})
 			}
+			for _, note := range v.Notes {
+				ui.Row(c).Gap(6).AlignItems(ui.Start).Children(func() {
+					ui.Icon(c, iconInfo).FontSize(12).TextColor(t.Warning)
+					ui.Text(c, note).FontSize(12).TextColor(t.TextMuted).Grow(1)
+				})
+			}
+
+			// Capped so the table below stays in view; the years scroll.
+			ui.Scroll(c).Height(112).FillWidth().Children(func() {
+				years := make([]int, 0, len(v.ROE.ROE))
+				for y := range v.ROE.ROE {
+					years = append(years, y)
+				}
+				sort.Sort(sort.Reverse(sort.IntSlice(years)))
+				ui.Column(c).Gap(1).Children(func() {
+					for _, y := range years {
+						money0 := fmt.Sprintf("%d", y)
+						roe := v.ROE.ROE[y]
+						bal, ok := v.Balance.Years[y]
+						row := ui.Row(c).Gap(0).Children(func() {
+							ui.Text(c, money0).Width(52).FontSize(12).TextColor(t.TextMuted)
+							roeColour := t.Text
+							if roe < r.Criteria.ROEMin {
+								roeColour = t.Warning
+							}
+							ui.Textf(c, "ROE %.1f%%", roe*100).Width(104).
+								FontSize(12).TextColor(roeColour)
+							if !ok {
+								ui.Text(c, "—").FontSize(12).TextColor(t.TextMuted)
+								return
+							}
+							net := bal.Cash - bal.Debt
+							ui.Textf(c, "cash %s", money(bal.Cash)).Width(104).
+								FontSize(12).TextColor(t.TextMuted)
+							ui.Textf(c, "debt %s", money(bal.Debt)).Width(104).
+								FontSize(12).TextColor(t.TextMuted)
+							netColour := t.Success
+							if net <= 0 {
+								netColour = t.Danger
+							}
+							ui.Textf(c, "net %s", money(net)).FontSize(12).TextColor(netColour)
+						})
+						_ = row
+					}
+				})
+			})
 		})
 	})
+}
+
+// netColour marks a net-cash figure: red where debt has overtaken cash.
+func netColour(t *ui.Theme, net float64) ui.Color {
+	if net <= 0 {
+		return t.Danger
+	}
+	return t.Text
+}
+
+// chip is a small rounded label for one figure.
+func chip(c *ui.Context, t *ui.Theme, text string, tint ui.Color) {
+	ui.Box(c).Radius(999).Border(1, t.Border).Padding(4, 10).
+		Children(func() {
+			ui.Text(c, text).FontSize(11).TextColor(tint)
+		})
 }
 
 // money renders a large figure in the units the figures come in.

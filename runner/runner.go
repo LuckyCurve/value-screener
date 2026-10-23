@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Event is one progress line the data layer writes to stderr.
@@ -31,6 +32,10 @@ type Event struct {
 type Options struct {
 	// Python is the interpreter to use. Empty means the app looks for one.
 	Python string
+	// DataLayer, when set, is a self-contained data layer binary (a frozen
+	// build) run directly instead of `python -m datalayer`. This is what
+	// lets the app ship as a single folder with no Python installed.
+	DataLayer string
 	// ConfigPath is the criteria file handed to the data layer.
 	ConfigPath string
 	// OutPath receives the dataset JSON.
@@ -47,12 +52,18 @@ type Options struct {
 // The child is started in its own process group so a cancelled run leaves no
 // orphaned Python holding an OpenD connection.
 func Run(ctx context.Context, dir string, opts Options) ([]byte, error) {
-	python, err := resolvePython(dir, opts.Python)
-	if err != nil {
-		return nil, err
+	program := opts.DataLayer
+	var args []string
+	if program != "" {
+		args = append(args, "--out", opts.OutPath)
+	} else {
+		python, err := resolvePython(dir, opts.Python)
+		if err != nil {
+			return nil, err
+		}
+		program = python
+		args = append(args, "-m", "datalayer", "--out", opts.OutPath)
 	}
-
-	args := []string{"-m", "datalayer", "--out", opts.OutPath}
 	if opts.ConfigPath != "" {
 		args = append(args, "--config", opts.ConfigPath)
 	}
@@ -60,7 +71,7 @@ func Run(ctx context.Context, dir string, opts Options) ([]byte, error) {
 		args = append(args, "--limit", strconv.Itoa(opts.Limit))
 	}
 
-	cmd := exec.CommandContext(ctx, python, args...)
+	cmd := exec.CommandContext(ctx, program, args...)
 	cmd.Dir = dir
 	hideWindow(cmd)
 
@@ -68,20 +79,28 @@ func Run(ctx context.Context, dir string, opts Options) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("stderr pipe: %w", err)
 	}
-	var stdout strings.Builder
-	cmd.Stdout = &stdout
-
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start data layer: %w", err)
 	}
 
-	go scanEvents(stderr, opts.OnEvent)
+	// Keep the last of the child's own words: the SDK writes its reason for
+	// failing there, and without it a failed run says only "exit status 2".
+	var tail tailBuffer
+	scanned := make(chan struct{})
+	go func() {
+		defer close(scanned)
+		scanEvents(stderr, &tail, opts.OnEvent)
+	}()
+	waitErr := cmd.Wait()
+	// Wait closes the pipe; let the reader drain it before reading the tail,
+	// or the child's last words may not be in it yet.
+	<-scanned
 
-	if err := cmd.Wait(); err != nil {
+	if waitErr != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, fmt.Errorf("data layer failed: %w\n%s", err, stdout.String())
+		return nil, fmt.Errorf("data layer failed: %w%s", waitErr, tail.suffix())
 	}
 
 	data, err := os.ReadFile(opts.OutPath)
@@ -91,16 +110,48 @@ func Run(ctx context.Context, dir string, opts Options) ([]byte, error) {
 	return data, nil
 }
 
-func scanEvents(r io.Reader, onEvent func(Event)) {
+// tailBuffer keeps the recent lines that were not progress events, so a
+// failure can report the child's own explanation.
+type tailBuffer struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+const tailLines = 6
+
+func (b *tailBuffer) add(line string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.lines = append(b.lines, line)
+	if len(b.lines) > tailLines {
+		b.lines = b.lines[len(b.lines)-tailLines:]
+	}
+}
+
+func (b *tailBuffer) suffix() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.lines) == 0 {
+		return ""
+	}
+	return "\n" + strings.Join(b.lines, "\n")
+}
+
+func scanEvents(r io.Reader, tail *tailBuffer, onEvent func(Event)) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64<<10), 1<<20)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if line == "" || line[0] != '{' {
+		if line == "" {
+			continue
+		}
+		if line[0] != '{' {
+			tail.add(line)
 			continue
 		}
 		var ev Event
 		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			tail.add(line)
 			continue
 		}
 		if onEvent != nil {

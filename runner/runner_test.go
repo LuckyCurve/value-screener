@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -10,7 +11,7 @@ import (
 
 func collect(lines string) []Event {
 	var got []Event
-	scanEvents(strings.NewReader(lines), func(ev Event) { got = append(got, ev) })
+	scanEvents(strings.NewReader(lines), &tailBuffer{}, func(ev Event) { got = append(got, ev) })
 	return got
 }
 
@@ -93,5 +94,76 @@ func TestResolvePythonFindsTheVenvInTheProjectDir(t *testing.T) {
 	}
 	if got != venv {
 		t.Errorf("want the project venv %q, got %q", venv, got)
+	}
+}
+
+func TestRunUsesTheDataLayerBinaryWhenGiven(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "dataset.json")
+	// A script stands in for the frozen data layer: it records its arguments
+	// and writes a dataset, so the wiring is checked without Python.
+	script := filepath.Join(dir, "frozen")
+	if runtime.GOOS == "windows" {
+		script += ".bat"
+	}
+	body := "echo %* > " + filepath.Join(dir, "args.txt") + "\n" +
+		"echo {\"stocks\":[]} > " + out + "\n"
+	if runtime.GOOS != "windows" {
+		body = "#!/bin/sh\necho \"$@\" > " + filepath.Join(dir, "args.txt") + "\n" +
+			"echo '{\"stocks\":[]}' > " + out + "\n"
+	}
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := Run(context.Background(), dir, Options{
+		DataLayer:  script,
+		ConfigPath: filepath.Join(dir, "criteria.json"),
+		OutPath:    out,
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(data) == 0 {
+		t.Error("no dataset read back")
+	}
+	args, err := os.ReadFile(filepath.Join(dir, "args.txt"))
+	if err != nil {
+		t.Fatalf("the binary never ran: %v", err)
+	}
+	got := string(args)
+	if strings.Contains(got, "-m datalayer") || !strings.Contains(got, "--out") {
+		t.Errorf("args %q should name --out and not python -m", got)
+	}
+}
+
+func TestFailureReportsTheChildsOwnWords(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "frozen")
+	// The child's progress and its reasons for failing go to stderr, as the
+	// real data layer's do; stdout carries the dataset.
+	body := "echo '{\"event\":\"phase\",\"name\":\"first pass\"}' >&2\n" +
+		"echo 'OpenD is not running on 127.0.0.1:11111' >&2\nexit 2\n"
+	if runtime.GOOS == "windows" {
+		script += ".bat"
+		body = "echo {\"event\":\"phase\",\"name\":\"first pass\"} 1>&2\r\n" +
+			"echo OpenD is not running on 127.0.0.1:11111 1>&2\r\n" +
+			"exit /b 2\r\n"
+	} else {
+		body = "#!/bin/sh\n" + body
+	}
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Run(context.Background(), dir, Options{
+		DataLayer: script,
+		OutPath:   filepath.Join(dir, "dataset.json"),
+	})
+	if err == nil {
+		t.Fatal("expected a failure")
+	}
+	if !strings.Contains(err.Error(), "OpenD is not running") {
+		t.Errorf("a failure should carry the child's reason, got %v", err)
 	}
 }

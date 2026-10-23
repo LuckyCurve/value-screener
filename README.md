@@ -37,6 +37,8 @@ enum descriptors.
 
 ## Run
 
+From source:
+
 ```sh
 go run .
 ```
@@ -44,7 +46,25 @@ go run .
 The window opens on `criteria.json` if there is one beside `datalayer/`, and
 on the shipped defaults otherwise.
 
+## Portable build
+
+```sh
+powershell -ExecutionPolicy Bypass -File scripts/build-windows.ps1
+```
+
+This makes `dist/value-screener/`, which runs on a machine with no Python and
+no Go: the window, plus `value-screener-dl.exe`, the data layer frozen into a
+single binary. Copy the folder anywhere, keep the two files together, and run
+`value-screener.exe`. All it needs is OpenD running and logged in.
+
+Run files (`criteria.run.json`, `dataset.json`) go to `data/` in that folder;
+`criteria.json` beside the app holds the rules it opens on.
+
 ## Tests
+
+CI runs these on every push and pull request
+(`.github/workflows/test.yml`): Go on Linux and Windows with the race
+detector, and the Python data layer on its own.
 
 ```sh
 go test ./...              # Go: rules, parsing, process wiring, the window

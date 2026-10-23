@@ -34,12 +34,8 @@ func main() {
 	}
 }
 
-// loadCriteria reads criteria.json from the project, so the app opens on the
+// loadCriteria reads criteria.json from the app's folder, so it opens on the
 // rules the user last wrote there. A missing file means the shipped defaults.
 func loadCriteria() (config.Criteria, error) {
-	dir, err := app.ProjectDir()
-	if err != nil {
-		return config.Default(), err
-	}
-	return config.Load(filepath.Join(dir, "criteria.json"))
+	return config.Load(filepath.Join(app.BaseDir(), "criteria.json"))
 }

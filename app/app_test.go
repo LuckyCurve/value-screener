@@ -57,8 +57,8 @@ func TestViewShowsEverySetting(t *testing.T) {
 	a := newTestApp()
 	tt := ui.NewTester(a.View, 1200, 760)
 	for _, label := range []string{
-		"PE ceiling", "ROE floor (%)", "Years of ROE", "Years below floor",
-		"Years of net cash", "PE history (years)", "Hong Kong", "A-shares",
+		"PE ceiling", "ROE floor (%)", "Over", "Years may miss",
+		"Net cash over", "PE history", "Hong Kong", "A-shares",
 	} {
 		if !tt.HasText(label) {
 			t.Errorf("the form should show %q, texts %q", label, tt.Texts())
@@ -114,7 +114,7 @@ func TestFinishedRunShowsPassedStock(t *testing.T) {
 	tt := ui.NewTester(a.View, 1200, 760)
 	runAndWait(t, tt)
 
-	for _, want := range []string{"Tencent", "HK.00700", "1 passed, 1 rejected"} {
+	for _, want := range []string{"Tencent", "HK.00700", "Passed", "Rejected"} {
 		if !tt.HasText(want) {
 			t.Errorf("want %q on screen, texts %q", want, tt.Texts())
 		}
@@ -299,7 +299,7 @@ func TestClickingAStockShowsItsYears(t *testing.T) {
 		t.Fatalf("click the row: %v", err)
 	}
 	// The year-by-year figures, which the table alone does not show.
-	if !tt.HasText("2024   ROE") {
+	if !tt.HasText("ROE 24.0%") {
 		t.Errorf("want the yearly detail, texts %q", tt.Texts())
 	}
 	if !tt.HasText("2023") {
@@ -331,5 +331,22 @@ func TestDetailIsAbsentUntilARowIsChosen(t *testing.T) {
 	runAndWait(t, tt)
 	if tt.HasText("ROE") && tt.HasText("2024") {
 		t.Errorf("no year rows before a choice, texts %q", tt.Texts())
+	}
+}
+
+func TestStatCardsSummariseTheRun(t *testing.T) {
+	a := newTestApp()
+	tt := ui.NewTester(a.View, 1280, 800)
+	runAndWait(t, tt)
+	if !tt.HasText("Passed") || !tt.HasText("Rejected") || !tt.HasText("Took") {
+		t.Errorf("want the summary cards, texts %q", tt.Texts())
+	}
+}
+
+func TestIdleWindowExplainsItself(t *testing.T) {
+	a := newTestApp()
+	tt := ui.NewTester(a.View, 1280, 800)
+	if !tt.HasText("No screen run yet") {
+		t.Errorf("want an empty state, texts %q", tt.Texts())
 	}
 }

@@ -8,3 +8,7 @@ dataset.json
 criteria.run.json
 report.html
 *.exe
+
+# Build output
+dist/
+build/

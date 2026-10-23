@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/LuckyCurve/value-screener/config"
 	"github.com/LuckyCurve/value-screener/dataset"
@@ -19,16 +20,17 @@ func DefaultScreen() Screen {
 	return func(ctx context.Context, c config.Criteria,
 		progress func(index, total int, message string)) (engine.Result, error) {
 
-		dir, err := ProjectDir()
-		if err != nil {
-			return engine.Result{}, err
+		dir, workDir := layout()
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return engine.Result{}, fmt.Errorf("prepare %s: %w", dir, err)
 		}
 		cfgPath, err := writeCriteria(dir, c)
 		if err != nil {
 			return engine.Result{}, err
 		}
 
-		data, err := runner.Run(ctx, dir, runner.Options{
+		data, err := runner.Run(ctx, workDir, runner.Options{
+			DataLayer:  DataLayer(),
 			ConfigPath: cfgPath,
 			OutPath:    filepath.Join(dir, "dataset.json"),
 			OnEvent: func(ev runner.Event) {
@@ -65,6 +67,63 @@ func dataLayerError(err error) error {
 		return err
 	}
 	return fmt.Errorf("the data layer stopped: %w", err)
+}
+
+// dataLayerBinary is the frozen data layer shipped beside the app.
+const dataLayerBinary = "value-screener-dl"
+
+// DataLayer returns the frozen data layer to run directly, or "" to run the
+// Python package instead. A packaged build puts the binary beside the app;
+// a source build uses the package and the project's venv.
+func DataLayer() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	dir := filepath.Dir(exe)
+	name := dataLayerBinary
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	path := filepath.Join(dir, name)
+	if _, err := os.Stat(path); err == nil {
+		return path
+	}
+	return ""
+}
+
+// BaseDir is the folder the app reads its settings from: its own folder when
+// packaged, the project when run from source.
+func BaseDir() string {
+	if DataLayer() != "" {
+		if exe, err := os.Executable(); err == nil {
+			return filepath.Dir(exe)
+		}
+	}
+	if dir, err := ProjectDir(); err == nil {
+		return dir
+	}
+	wd, _ := os.Getwd()
+	return wd
+}
+
+// layout returns where run files go and the directory the data layer runs in.
+//
+// A packaged build keeps everything in <app folder>/data and runs the frozen
+// binary there. A source build writes beside the project and runs Python,
+// which needs the project as its working directory.
+func layout() (dir, workDir string) {
+	if DataLayer() != "" {
+		if exe, err := os.Executable(); err == nil {
+			base := filepath.Dir(exe)
+			return filepath.Join(base, "data"), base
+		}
+	}
+	if pd, err := ProjectDir(); err == nil {
+		return pd, pd
+	}
+	wd, _ := os.Getwd()
+	return wd, wd
 }
 
 // ProjectDir finds the directory holding the datalayer package, searching
