@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/LuckyCurve/value-screener/cache"
 	"github.com/LuckyCurve/value-screener/config"
@@ -14,17 +15,12 @@ import (
 	"github.com/LuckyCurve/value-screener/source"
 )
 
-// BaseDir is the folder the app reads its settings from: its own folder when
-// packaged, the project when run from source.
+// BaseDir is the folder the app reads its settings from and keeps its cache
+// in: its own folder when packaged, the project when run from source.
 func BaseDir() string {
-	if dir, err := exeDir(); err == nil {
-		if _, err := os.Stat(filepath.Join(dir, "criteria.json")); err == nil {
+	if packaged() {
+		if dir, err := exeDir(); err == nil {
 			return dir
-		}
-		if layer, _ := DataLayer(); layer != "" {
-			if _, err := os.Stat(filepath.Join(dir, filepath.Base(layer))); err == nil {
-				return dir
-			}
 		}
 	}
 	if dir, err := ProjectDir(); err == nil {
@@ -35,6 +31,29 @@ func BaseDir() string {
 	}
 	wd, _ := os.Getwd()
 	return wd
+}
+
+// packaged reports whether this build ships as an app of its own rather than
+// running from the project: it carries the data layer, or has one beside it.
+// A source build has neither, and would find the project even from a folder
+// inside it, which is why the layer decides and the project is the fallback.
+func packaged() bool {
+	if len(embeddedDataLayer) > 0 {
+		return true
+	}
+	dir, err := exeDir()
+	if err != nil {
+		return false
+	}
+	name := dataLayerName
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+		return true
+	}
+	_, err = os.Stat(filepath.Join(dir, "criteria.json"))
+	return err == nil
 }
 
 func exeDir() (string, error) {
