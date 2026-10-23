@@ -82,10 +82,10 @@ func Run(ctx context.Context, dir string, opts Options) ([]byte, error) {
 		defer close(scanned)
 		scanEvents(stderr, &tail, opts.OnEvent)
 	}()
-	waitErr := cmd.Wait()
-	// Wait closes the pipe; let the reader drain it before reading the tail,
-	// or the child's last words may not be in it yet.
+	// Drain the pipe before Wait: Wait closes it as soon as the child exits,
+	// and anything still buffered would be lost.
 	<-scanned
+	waitErr := cmd.Wait()
 
 	if waitErr != nil {
 		if ctx.Err() != nil {
