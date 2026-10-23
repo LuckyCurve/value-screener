@@ -4,6 +4,7 @@ cancelled run leaves behind."""
 import io
 import json
 import os
+import sys
 
 from datalayer import __main__ as cli
 from datalayer import futuclient
@@ -58,25 +59,28 @@ def test_first_pass_without_a_floor_asks_for_no_roe_condition(monkeypatch):
         def add_retrieve_simple(self, *a):
             pass
 
-    class FakeModule:
-        StockScreenRequest = FakeRequest
+    # The SDK is absent on CI, so the two imports first_pass makes are
+    # answered from sys.modules.
+    screen = type("M", (), {
+        "StockScreenRequest": FakeRequest,
+        "FinancialProperty": type("F", (), {"ROE": 1}),
+    })()
+    constants = type("M", (), {
+        "FinancialProperty": type("F", (), {"ROE": 1}),
+        "ScrMarket": type("S", (), {"HK": 1, "US": 2, "CN": 3}),
+        "SimpleField": type("F", (), {"MARKET": 1}),
+        "SimpleProperty": type("P", (), {"PE_TTM": 1, "PB": 2, "MARKET_CAP": 3}),
+        "Term": type("T", (), {"ANNUAL": 1}),
+    })()
 
     def fake_call(ctx, req):
         # The SDK's (ret, data) pair; data is (last_page, total, items).
         return futuclient.RET_OK, (True, 0, [])
 
     monkeypatch.setattr(futuclient, "_screen_call", fake_call)
-    monkeypatch.setattr(
-        "futu.quote.stock_screen_const",
-        type("M", (), {
-            "FinancialProperty": type("F", (), {"ROE": 1}),
-            "ScrMarket": type("S", (), {"HK": 1, "US": 2, "CN": 3}),
-            "SimpleField": type("F", (), {"MARKET": 1}),
-            "SimpleProperty": type("P", (), {"PE_TTM": 1, "PB": 2, "MARKET_CAP": 3}),
-            "Term": type("T", (), {"ANNUAL": 1}),
-        })(),
-    )
-    monkeypatch.setitem(__import__("sys").modules, "futu", FakeModule)
+    monkeypatch.setitem(sys.modules, "futu", screen)
+    monkeypatch.setitem(sys.modules, "futu.quote", type("M", (), {})())
+    monkeypatch.setitem(sys.modules, "futu.quote.stock_screen_const", constants)
 
     client = futuclient.QuoteClient()
     client.first_pass(["HK"], 20, None, 0)
