@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Run artifacts: regenerated on every screen.
+dataset.json
+criteria.run.json
+report.html
+*.exe
