@@ -40,7 +40,17 @@ type Balance struct {
 }
 
 // Progress reports how far a fetch has got, for the window.
+//
+// It may be nil: a caller with nothing to show, such as a retry of one
+// stock, passes none, and report is then a no-op.
 type Progress func(index, total int, message string)
+
+// report calls p if there is anyone listening.
+func (p Progress) report(index, total int, message string) {
+	if p != nil {
+		p(index, total, message)
+	}
+}
 
 // Source is one channel of figures.
 type Source interface {

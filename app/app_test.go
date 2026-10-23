@@ -547,3 +547,42 @@ func TestAMissingStocksDialogSaysWhy(t *testing.T) {
 		t.Errorf("want the retry in the dialog, texts %q", tt.Texts())
 	}
 }
+
+func TestAPanicInTheScreenBecomesAFailureNotAnExit(t *testing.T) {
+	a := newTestApp()
+	a.Screen = func(context.Context, config.Criteria, func(int, int, string)) (engine.Result, error) {
+		panic("a nil map somewhere")
+	}
+	tt := ui.NewTester(a.View, 1280, 800)
+	runAndWait(t, tt)
+	if a.Status() != statusFailed {
+		t.Errorf("a panic should read as a failure, status %v", a.Status())
+	}
+	if !strings.Contains(a.Message(), "a nil map somewhere") {
+		t.Errorf("the reason should be kept, got %q", a.Message())
+	}
+}
+
+func TestAPanicInARetryStaysInItsRow(t *testing.T) {
+	a := newTestApp()
+	a.Screen = func(context.Context, config.Criteria, func(int, int, string)) (engine.Result, error) {
+		return withMissing(), nil
+	}
+	a.Retry = func(context.Context, config.Criteria, engine.Stock) (engine.Verdict, error) {
+		panic("a nil function somewhere")
+	}
+	tt := ui.NewTester(a.View, 1280, 800)
+	runAndWait(t, tt)
+	a.RetryStock("US.TCEHY")
+	for i := 0; i < 100 && a.Retrying() != ""; i++ {
+		tt.Advance(10 * time.Millisecond)
+		tt.Frame()
+	}
+	r := a.Result()
+	if r == nil || len(r.Missing) != 1 {
+		t.Fatalf("the stock should still be missing: %+v", r)
+	}
+	if !strings.Contains(r.Missing[0].Unavailable, "a nil function somewhere") {
+		t.Errorf("the reason should be in the row, got %q", r.Missing[0].Unavailable)
+	}
+}

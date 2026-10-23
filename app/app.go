@@ -260,7 +260,7 @@ func (a *App) run(ctx context.Context, cancel context.CancelFunc, c config.Crite
 	defer close(done)
 	started := time.Now()
 
-	res, err := a.Screen(ctx, c, func(index, total int, message string) {
+	res, err := a.screen(ctx, c, func(index, total int, message string) {
 		a.mu.Lock()
 		a.progress, a.total = index, total
 		if message != "" {
@@ -334,7 +334,7 @@ func (a *App) RetryStock(code string) bool {
 	a.invalidate()
 
 	go func() {
-		v, err := a.Retry(ctx, a.Criteria(), stock)
+		v, err := a.retry(ctx, a.Criteria(), stock)
 		cancel()
 
 		a.mu.Lock()
@@ -354,6 +354,31 @@ func (a *App) RetryStock(code string) bool {
 		a.invalidate()
 	}()
 	return true
+}
+
+// screen runs one pass, turning a panic into an error for the window: a bug
+// in the run goroutine would otherwise close the app and lose the run.
+func (a *App) screen(ctx context.Context, c config.Criteria,
+	progress func(index, total int, message string)) (res engine.Result, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("the screen stopped: %v", r)
+		}
+	}()
+	return a.Screen(ctx, c, progress)
+}
+
+// retry runs one retry, turning a panic into an error for the row it came
+// from: a bug in a background goroutine would otherwise take the window
+// down with it, and the user would lose the run they were looking at.
+func (a *App) retry(ctx context.Context, c config.Criteria,
+	stock engine.Stock) (v engine.Verdict, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("the retry failed: %v", r)
+		}
+	}()
+	return a.Retry(ctx, c, stock)
 }
 
 // Retrying is the code being fetched again, "" for none.

@@ -144,11 +144,11 @@ func (f Futu) run(ctx context.Context, command string, q Query, codes []string,
 		OnEvent: func(ev runner.Event) {
 			switch ev.Event {
 			case "found":
-				progress(0, ev.Count, "")
+				progress.report(0, ev.Count, "")
 			case "stock":
-				progress(ev.Index, ev.Total, ev.Code)
+				progress.report(ev.Index, ev.Total, ev.Code)
 			case "error":
-				progress(0, 0, ev.Message)
+				progress.report(0, 0, ev.Message)
 			}
 		},
 	})
