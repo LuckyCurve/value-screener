@@ -49,6 +49,12 @@ def test_non_positive_roe_rejected():
         config_io.validate({"markets": ["HK"], "pe_max": 20, "roe_min": -1})
 
 
+def test_slack_wider_than_the_window_rejected():
+    with pytest.raises(ValueError, match="roe_slack"):
+        config_io.validate(
+            {"markets": ["HK"], "pe_max": 20, "roe_years": 5, "roe_slack": 5})
+
+
 def test_unsupported_percentile_window_rejected():
     with pytest.raises(ValueError, match="percentile_years"):
         config_io.validate(

@@ -117,6 +117,5 @@ func TestQueryReachesTheDataLayer(t *testing.T) {
 func queryOf(c config.Criteria) Query {
 	return Query{Markets: c.Markets, PEmax: c.PEmax, ROEMin: c.ROEMin,
 		ROEYears: c.ROEYears, ROESlack: c.ROESlack,
-		CoarseROEMin: c.CoarseROEMin, CashYears: c.CashYears,
-		PercentileYears: c.PercentileYears}
+		CashYears: c.CashYears, PercentileYears: c.PercentileYears}
 }

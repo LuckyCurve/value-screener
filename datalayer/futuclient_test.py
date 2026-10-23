@@ -95,6 +95,20 @@ def test_balance_series_sums_cash_and_takes_debt_magnitude(monkeypatch):
     assert got == {2024: {"cash": 120.0, "debt": 40.0}}
 
 
+def test_balance_series_reads_hong_kong_borrowings_as_positive(monkeypatch):
+    # Hong Kong statements report a borrowing as a positive number. Taking
+    # it at face value used to leave debt negative, so cash - debt was
+    # cash + borrowings and the net-cash test passed every Hong Kong stock.
+    report = _balance_report(2024, {
+        "现金及等价物": 100.0,
+        "银行贷款及透支": 30.0,
+    })
+    client = futuclient.QuoteClient()
+    monkeypatch.setattr(client, "annual_reports", lambda code, st: [report])
+    got = client.balance_series("HK.00001")
+    assert got == {2024: {"cash": 100.0, "debt": 30.0}}
+
+
 def test_balance_series_ignores_lines_outside_the_mapping(monkeypatch):
     report = _balance_report(2024, {
         "现金及等价物": 100.0,

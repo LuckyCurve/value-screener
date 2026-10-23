@@ -62,9 +62,18 @@ type App struct {
 	message  string
 	elapsed  string
 	result   *engine.Result
-	running  bool
-	cancel   context.CancelFunc
-	done     chan struct{}
+	// stopped is set when the user cancelled: the result, if any, is what
+	// the run had reached, not a complete screen.
+	stopped bool
+	// cancelling is set the moment Cancel is pressed, so the window says it
+	// is stopping instead of looking stuck until the child dies.
+	cancelling bool
+	running    bool
+	cancel     context.CancelFunc
+	done       chan struct{}
+	// retryCancel stops the retry in flight, kept apart from the run's own
+	// cancel so one can never clear the other.
+	retryCancel context.CancelFunc
 
 	// tab is 0 for passing stocks, 1 for rejected ones, 2 for the ones the
 	// channel could not answer for.
@@ -188,6 +197,14 @@ func (a *App) Criteria() config.Criteria {
 	return c
 }
 
+// IsStopping reports whether a cancel is under way: pressed, but the channel
+// has not stopped yet.
+func (a *App) IsStopping() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.cancelling
+}
+
 // Status reports where the run stands.
 func (a *App) Status() Status {
 	a.mu.Lock()
@@ -221,7 +238,10 @@ func (a *App) IsRunning() bool {
 // usable screen, or a run is already under way; the reason is then Message.
 func (a *App) Start() bool {
 	a.mu.Lock()
-	if a.running {
+	// A retry in flight is still talking to the channel through the same
+	// files a run uses; starting one now would have the two overwrite each
+	// other's codes and figures.
+	if a.running || a.retrying != "" {
 		a.mu.Unlock()
 		return false
 	}
@@ -248,6 +268,7 @@ func (a *App) Start() bool {
 	a.progress, a.total = 0, 0
 	a.elapsed = ""
 	a.result = nil
+	a.stopped, a.cancelling = false, false
 	a.mu.Unlock()
 	a.chosen = [3]int{-1, -1, -1}
 	a.detail, a.tab = 0, 0
@@ -271,22 +292,25 @@ func (a *App) run(ctx context.Context, cancel context.CancelFunc, c config.Crite
 	})
 	cancel()
 
+	elapsed := time.Since(started).Round(time.Second).String()
+
 	a.mu.Lock()
 	a.running = false
 	a.cancel = nil
+	a.cancelling = false
+	// A cancelled run keeps what it reached: the stocks judged before the
+	// stop are as true as any, and throwing them away is the one thing a
+	// cancel must not do.
+	a.result = &res
+	a.elapsed = elapsed
 	switch {
 	case errors.Is(err, context.Canceled):
-		a.status = statusIdle
-		a.message = ""
-		a.progress, a.total = 0, 0
+		a.status, a.stopped, a.message = statusFinished, true, ""
 	case err != nil:
-		a.status = statusFailed
-		a.message = err.Error()
+		a.status, a.message = statusFailed, err.Error()
 	default:
 		a.status = statusFinished
 		a.message = ""
-		a.result = &res
-		a.elapsed = time.Since(started).Round(time.Second).String()
 	}
 	a.mu.Unlock()
 	a.invalidate()
@@ -297,6 +321,7 @@ func (a *App) run(ctx context.Context, cancel context.CancelFunc, c config.Crite
 func (a *App) Cancel() {
 	a.mu.Lock()
 	cancel := a.cancel
+	a.cancelling = cancel != nil
 	a.mu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -327,9 +352,15 @@ func (a *App) RetryStock(code string) bool {
 		a.mu.Unlock()
 		return false
 	}
+	// The result this answer belongs to: a run started while the retry is in
+	// flight replaces a.result with one of its own.
+	target := a.result
 	a.retrying = code
 	ctx, cancel := context.WithCancel(context.Background())
-	a.cancel = cancel
+	// Not a.cancel: that names the run under way, and a run can start while
+	// this retry is still in flight. Clearing it here would leave that run
+	// unstoppable.
+	a.retryCancel = cancel
 	a.mu.Unlock()
 	a.invalidate()
 
@@ -338,15 +369,18 @@ func (a *App) RetryStock(code string) bool {
 		cancel()
 
 		a.mu.Lock()
-		a.retrying, a.cancel = "", nil
-		if a.result != nil && a.status == statusFinished {
+		a.retrying, a.retryCancel = "", nil
+		// Only into the result it was asked about. A run started while the
+		// retry was in flight has a result of its own, and this answer says
+		// nothing about it.
+		if target != nil && a.result == target && a.status == statusFinished {
 			switch {
 			case err == nil:
-				a.result.Replace(v)
+				target.Replace(v)
 			case !errors.Is(err, context.Canceled):
 				// The channel could not be reached at all: the stock keeps
 				// its place, and its row says what went wrong this time.
-				a.result.Replace(engine.Verdict{Stock: stock,
+				target.Replace(engine.Verdict{Stock: stock,
 					Unavailable: err.Error()})
 			}
 		}
@@ -540,12 +574,18 @@ func (a *App) form(c *ui.Context, t *ui.Theme) {
 	})
 
 	if a.IsRunning() {
+		stopping := a.IsStopping()
+		label := "Cancel"
+		if stopping {
+			label = "Stopping…"
+		}
 		btn := ui.Button(c, "").FillWidth().Children(func() {
 			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
 				ui.Icon(c, iconStop).FontSize(15)
-				ui.Text(c, "Cancel").SingleLine()
+				ui.Text(c, label).SingleLine()
 			})
 		})
+		btn.Disabled(stopping)
 		if btn.Clicked() {
 			a.Cancel()
 		}
@@ -567,15 +607,21 @@ func (a *App) results(c *ui.Context, t *ui.Theme) {
 	a.mu.Lock()
 	status, result, message := a.status, a.result, a.message
 	progress, total, elapsed := a.progress, a.total, a.elapsed
+	stopped := a.stopped
 	a.mu.Unlock()
 
 	switch status {
 	case statusRunning:
+		stopping := a.IsStopping()
 		card(c, t, 12, func() {
 			ui.Column(c).Gap(10).Children(func() {
 				ui.Row(c).Gap(9).AlignItems(ui.Center).Children(func() {
 					ui.Icon(c, iconClock).FontSize(16).TextColor(t.Accent)
-					ui.Text(c, "Screening").FontSize(14).Bold().Grow(1)
+					heading := "Screening"
+					if stopping {
+						heading = "Stopping"
+					}
+					ui.Text(c, heading).FontSize(14).Bold().Grow(1)
 					pct := "…"
 					if total > 0 {
 						pct = fmt.Sprintf("%d%%", progress*100/total)
@@ -608,8 +654,18 @@ func (a *App) results(c *ui.Context, t *ui.Theme) {
 				})
 			})
 		})
+		// A run that failed part-way judged stocks before it did; they are
+		// still worth looking at.
+		if n := count(result); n > 0 {
+			ui.Text(c, fmt.Sprintf("Judged before it stopped: %d stocks.", n)).
+				FontSize(12).TextColor(t.TextMuted)
+			a.finished(c, t, result, elapsed)
+		}
 
 	case statusFinished:
+		if stopped {
+			a.stoppedNote(c, t, result)
+		}
 		a.finished(c, t, result, elapsed)
 
 	default:
@@ -623,6 +679,28 @@ func (a *App) results(c *ui.Context, t *ui.Theme) {
 			ui.Text(c, message).FontSize(12).TextColor(t.Danger)
 		}
 	}
+}
+
+// count is how many stocks a run judged, right or wrong.
+func count(r *engine.Result) int {
+	if r == nil {
+		return 0
+	}
+	return len(r.Passed) + len(r.Rejected) + len(r.Missing)
+}
+
+// stoppedNote says a cancelled run was cancelled, and that the figures below
+// are what it reached rather than the whole market.
+func (a *App) stoppedNote(c *ui.Context, t *ui.Theme, r *engine.Result) {
+	n := count(r)
+	text := fmt.Sprintf("Stopped early: these are the %d stocks judged before you cancelled.", n)
+	if n == 0 {
+		text = "Stopped before any stock was judged."
+	}
+	ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+		ui.Icon(c, iconStop).FontSize(13).TextColor(t.Warning)
+		ui.Text(c, text).FontSize(12).TextColor(t.TextMuted)
+	})
 }
 
 func (a *App) finished(c *ui.Context, t *ui.Theme, r *engine.Result, elapsed string) {

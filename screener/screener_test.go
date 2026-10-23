@@ -238,6 +238,41 @@ func TestSilentChannelIsReported(t *testing.T) {
 	}
 }
 
+// A channel that stopped part-way answers for some stocks. Those answers are
+// as true as any other; only the stocks never asked about are left out.
+func TestAStoppedRunKeepsTheVerdictsItReached(t *testing.T) {
+	first, a := tencent()
+	second := source.Candidate{Code: "HK.00005", Name: "HSBC", PE: 9}
+	f := &partial{candidates: []source.Candidate{first, second},
+		figures: []source.Annual{a}, err: context.Canceled}
+
+	res, err := Screen{Criteria: criteria(), Source: f}.Run(context.Background(), nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("the stop should be reported, got %v", err)
+	}
+	if len(res.Passed) != 1 || res.Passed[0].Stock.Code != "HK.00700" {
+		t.Fatalf("the stock it reached should be judged, got %+v", res)
+	}
+	if len(res.Missing) != 0 {
+		t.Errorf("a stock never asked about must not be reported as refused: %+v", res.Missing)
+	}
+}
+
+// partial is a channel that answers for some stocks and then stops.
+type partial struct {
+	candidates []source.Candidate
+	figures    []source.Annual
+	err        error
+}
+
+func (p *partial) Candidates(context.Context, source.Query, source.Progress) ([]source.Candidate, error) {
+	return p.candidates, nil
+}
+
+func (p *partial) Figures(context.Context, source.Query, []string, source.Progress) ([]source.Annual, error) {
+	return p.figures, p.err
+}
+
 func TestChannelErrorStopsTheRun(t *testing.T) {
 	f := &fake{screenErr: errors.New("OpenD is not running")}
 	_, err := Screen{Criteria: criteria(), Source: f}.Run(context.Background(), nil)

@@ -30,11 +30,6 @@ type Criteria struct {
 	// ROESlack is how many of those years may fall under ROEMin.
 	ROESlack int `json:"roe_slack"`
 
-	// CoarseROEMin is the floor used for the first-pass screen. It should be
-	// at or below ROEMin: the coarse screen is only a prefilter, and the
-	// per-stock pass makes the real decision.
-	CoarseROEMin float64 `json:"coarse_roe_min"`
-
 	// CashYears is how far back the net-cash test looks.
 	CashYears int `json:"cash_years"`
 
@@ -50,7 +45,6 @@ func Default() Criteria {
 		ROEMin:          0.20,
 		ROEYears:        15,
 		ROESlack:        0,
-		CoarseROEMin:    0.15,
 		CashYears:       10,
 		PercentileYears: 10,
 	}

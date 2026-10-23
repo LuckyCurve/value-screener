@@ -108,12 +108,14 @@ class QuoteClient:
                 time.sleep(10 * (attempt + 1))
         raise OpenDError(f"rate limited after {self.max_retries} retries: {last}")
 
-    def first_pass(self, markets: list[str], pe_max: float, roe_min: float,
-                   continuous_years: int) -> list[dict]:
+    def first_pass(self, markets: list[str], pe_max: float,
+                   roe_min: float | None, continuous_years: int) -> list[dict]:
         """Return codes whose PE and recent ROE history clear the prefilter.
 
         The prefilter is deliberately loose: it only needs to avoid missing a
         stock the per-stock pass would keep. The engine makes the decision.
+        A roe_min of None asks for no ROE condition at all, for rules the
+        endpoint cannot state without risking a stock the rules would keep.
         """
         from futu import StockScreenRequest
         from futu.quote.stock_screen_const import (
@@ -137,10 +139,14 @@ class QuoteClient:
         req = StockScreenRequest()
         req.add_simple_field(SimpleField.MARKET, allowed)
         req.add_simple_property(SimpleProperty.PE_TTM, lower=0, upper=pe_max)
-        req.add_financial_property(
-            FinancialProperty.ROE, term=Term.ANNUAL,
-            lower=roe_min, continuous_period=max(1, min(12, continuous_years)),
-        )
+        if roe_min is not None:
+            # The endpoint takes at most twelve consecutive years; a longer
+            # window returns nothing rather than erroring.
+            req.add_financial_property(
+                FinancialProperty.ROE, term=Term.ANNUAL,
+                lower=roe_min,
+                continuous_period=max(1, min(12, continuous_years)),
+            )
         req.add_retrieve_basic(1101)
         req.add_retrieve_basic(1102)
         req.add_retrieve_simple(SimpleProperty.PE_TTM)
@@ -216,9 +222,13 @@ class QuoteClient:
             if year is None:
                 continue
             items = _items(rep)
-            cash = sum((items.get(n) or 0.0) for n in names.cash)
-            # Debt lines are reported negative; take the magnitude.
-            debt = -sum((items.get(n) or 0.0) for n in names.debt)
+            # Magnitudes, because the sign a statement puts on cash or on a
+            # borrowing is Futu's convention, not the company's: Hong Kong
+            # reports borrowings positive, the US labels them with a minus.
+            # Summing raw values makes the net-cash test depend on which
+            # exchange a stock lists on.
+            cash = sum(abs(items.get(n) or 0.0) for n in names.cash)
+            debt = sum(abs(items.get(n) or 0.0) for n in names.debt)
             series[year] = {"cash": cash, "debt": debt}
         return series
 

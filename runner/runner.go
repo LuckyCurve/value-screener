@@ -47,6 +47,9 @@ type Options struct {
 
 // Run executes the data layer and returns its dataset JSON.
 //
+// On cancellation it returns whatever the data layer had written with
+// ctx.Err(); a caller that wants the partial result uses both.
+//
 // The child is started in its own process group so a cancelled run leaves no
 // orphaned Python holding an OpenD connection.
 func Run(ctx context.Context, dir string, opts Options) ([]byte, error) {
@@ -62,9 +65,15 @@ func Run(ctx context.Context, dir string, opts Options) ([]byte, error) {
 	}
 	args = append(args, opts.Args...)
 
-	cmd := exec.CommandContext(ctx, program, args...)
+	// The dataset of the previous run must not be mistaken for this one's,
+	// which is read back even after a cancel.
+	if opts.OutPath != "" {
+		_ = os.Remove(opts.OutPath)
+	}
+
+	cmd := exec.Command(program, args...)
 	cmd.Dir = dir
-	hideWindow(cmd)
+	prepare(cmd)
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -73,6 +82,16 @@ func Run(ctx context.Context, dir string, opts Options) ([]byte, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start data layer: %w", err)
 	}
+
+	// Cancelling must stop the work, not merely stop waiting for it: the
+	// child's own children go with it.
+	stop, err := watch(ctx, cmd)
+	if err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, fmt.Errorf("watch data layer: %w", err)
+	}
+	defer stop()
 
 	// Keep the last of the child's own words: the SDK writes its reason for
 	// failing there, and without it a failed run says only "exit status 2".
@@ -87,16 +106,21 @@ func Run(ctx context.Context, dir string, opts Options) ([]byte, error) {
 	<-scanned
 	waitErr := cmd.Wait()
 
-	if waitErr != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+	// A cancelled run was killed mid-way, but the data layer writes each
+	// stock as it goes: whatever it reached is worth reading back, so the
+	// window can show the stocks it did finish.
+	data, readErr := os.ReadFile(opts.OutPath)
+	if ctx.Err() != nil {
+		if readErr == nil {
+			return data, ctx.Err()
 		}
+		return nil, ctx.Err()
+	}
+	if waitErr != nil {
 		return nil, fmt.Errorf("data layer failed: %w%s", waitErr, tail.suffix())
 	}
-
-	data, err := os.ReadFile(opts.OutPath)
-	if err != nil {
-		return nil, fmt.Errorf("read dataset: %w", err)
+	if readErr != nil {
+		return nil, fmt.Errorf("read dataset: %w", readErr)
 	}
 	return data, nil
 }

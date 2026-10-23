@@ -69,7 +69,6 @@ type Query struct {
 	ROEMin          float64  `json:"roe_min"`
 	ROEYears        int      `json:"roe_years"`
 	ROESlack        int      `json:"roe_slack"`
-	CoarseROEMin    float64  `json:"coarse_roe_min"`
 	CashYears       int      `json:"cash_years"`
 	PercentileYears int      `json:"percentile_years"`
 }

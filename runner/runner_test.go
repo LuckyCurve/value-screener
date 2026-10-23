@@ -2,11 +2,13 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func collect(lines string) []Event {
@@ -134,6 +136,87 @@ func TestRunUsesTheDataLayerBinaryWhenGiven(t *testing.T) {
 	got := string(args)
 	if strings.Contains(got, "-m datalayer") || !strings.Contains(got, "figures") {
 		t.Errorf("args %q should be the layer's own, not a python invocation", got)
+	}
+}
+
+// A cancelled run must stop the work and still return what was written: the
+// window shows those stocks instead of losing the whole screen.
+func TestCancelStopsTheChildAndKeepsWhatItWrote(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "dataset.json")
+	done := filepath.Join(dir, "done.txt")
+	script := filepath.Join(dir, "frozen")
+	// Writes one stock, says it is there, then hangs as the real layer does
+	// between stocks.
+	var body string
+	if runtime.GOOS == "windows" {
+		script += ".bat"
+		body = "> \"" + out + "\" echo {\"stocks\":[{\"code\":\"HK.00700\"}]\r\n" +
+			"type nul > \"" + done + "\"\r\n" +
+			"ping -n 31 127.0.0.1 > nul\r\n"
+	} else {
+		body = "#!/bin/sh\n" +
+			"printf '%s' '{\"stocks\":[{\"code\":\"HK.00700\"}]}' > " + out + "\n" +
+			"touch " + done + "\n" +
+			"sleep 30\n"
+	}
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		for i := 0; i < 200; i++ {
+			if _, err := os.Stat(done); err == nil {
+				cancel()
+				return
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+	}()
+
+	started := time.Now()
+	data, err := Run(ctx, dir, Options{DataLayer: script, Args: []string{"figures"},
+		OutPath: out})
+	took := time.Since(started)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("a cancelled run should say so, got %v", err)
+	}
+	if !strings.Contains(string(data), "HK.00700") {
+		t.Errorf("the stocks written before the cancel should come back, got %q", data)
+	}
+	if took > 10*time.Second {
+		t.Errorf("cancel took %v; the child should be killed, not waited out", took)
+	}
+}
+
+// The file a previous run left must not be read as this run's answer: a
+// child that dies without writing would otherwise return stale figures.
+func TestStaleDatasetIsNotReturned(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "dataset.json")
+	if err := os.WriteFile(out, []byte(`{"stocks":[{"code":"HK.OLD"}]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(dir, "frozen")
+	body := "exit 2\n"
+	if runtime.GOOS == "windows" {
+		script += ".bat"
+		body = "exit /b 2\r\n"
+	} else {
+		body = "#!/bin/sh\n" + body
+	}
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Run(context.Background(), dir, Options{DataLayer: script,
+		Args: []string{"figures"}, OutPath: out})
+	if err == nil {
+		t.Fatal("a failing child should fail the run")
+	}
+	if strings.Contains(err.Error(), "HK.OLD") {
+		t.Errorf("stale figures leaked into the run: %v", err)
 	}
 }
 

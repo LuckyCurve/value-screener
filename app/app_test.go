@@ -213,6 +213,66 @@ func TestCancelIsNotAFailure(t *testing.T) {
 	}
 }
 
+// Cancelling stops the run; it must not throw away the stocks it finished.
+func TestCancelKeepsWhatTheRunReached(t *testing.T) {
+	a := newTestApp()
+	a.Screen = func(context.Context, config.Criteria, func(int, int, string)) (engine.Result, error) {
+		r := sample()
+		r.Passed[0].Stock.Name = "Tencent"
+		return r, context.Canceled
+	}
+	a.Start()
+	a.Wait()
+
+	if a.Status() != statusFinished {
+		t.Fatalf("a cancelled run with results should read as finished, got %v", a.Status())
+	}
+	tt := ui.NewTester(a.View, 1200, 760)
+	if !tt.HasText("Tencent") {
+		t.Errorf("the stock judged before the cancel should still be shown, texts %q", tt.Texts())
+	}
+	if !tt.HasText("Stopped early") {
+		t.Errorf("the window should say the figures are partial, texts %q", tt.Texts())
+	}
+}
+
+func TestCancelWithNothingJudgedSaysSo(t *testing.T) {
+	a := newTestApp()
+	a.Screen = func(context.Context, config.Criteria, func(int, int, string)) (engine.Result, error) {
+		return engine.Result{}, context.Canceled
+	}
+	a.Start()
+	a.Wait()
+	tt := ui.NewTester(a.View, 1200, 760)
+	if !tt.HasText("Stopped before any stock was judged") {
+		t.Errorf("want a plain stop message, texts %q", tt.Texts())
+	}
+}
+
+func TestCancelSaysItIsStopping(t *testing.T) {
+	a := newTestApp()
+	release := make(chan struct{})
+	a.Screen = func(ctx context.Context, _ config.Criteria, _ func(int, int, string)) (engine.Result, error) {
+		<-ctx.Done()
+		<-release // the child has not died yet
+		return engine.Result{}, ctx.Err()
+	}
+	tt := ui.NewTester(a.View, 1200, 760)
+	if err := tt.Click("Run screen"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if err := tt.Click("Cancel"); err != nil {
+		t.Fatalf("click Cancel: %v", err)
+	}
+	tt.Frame()
+	if !tt.HasText("Stopping") {
+		t.Errorf("the window should say it is stopping, texts %q", tt.Texts())
+	}
+	close(release)
+	a.Wait()
+}
+
 func TestNoMarketIsRefusedBeforeRunning(t *testing.T) {
 	a := newTestApp()
 	called := make(chan struct{}, 1)
@@ -500,6 +560,37 @@ func TestTheDialogClosesAndCanBeOpenedForTheSameStockAgain(t *testing.T) {
 	}
 	if !tt.HasText("NET CASH") {
 		t.Errorf("the dialog should open again, texts %q", tt.Texts())
+	}
+}
+
+// A retry and a run both go through the same files in the data folder. A
+// run started while one is in flight would overwrite the other's codes and
+// figures, so it waits.
+func TestARunCannotStartWhileARetryIsInFlight(t *testing.T) {
+	a := newTestApp()
+	a.Screen = func(context.Context, config.Criteria, func(int, int, string)) (engine.Result, error) {
+		return withMissing(), nil
+	}
+	release := make(chan struct{})
+	a.Retry = func(_ context.Context, _ config.Criteria, s engine.Stock) (engine.Verdict, error) {
+		<-release
+		return engine.Verdict{Stock: s, Passed: true}, nil
+	}
+	tt := ui.NewTester(a.View, 1280, 800)
+	runAndWait(t, tt)
+	if err := tt.Click("No data (1)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tt.Click("Retry US.TCEHY"); err != nil {
+		t.Fatal(err)
+	}
+	if a.Start() {
+		t.Error("a run should not start while a retry is in flight")
+	}
+	close(release)
+	for i := 0; i < 100 && a.Retrying() != ""; i++ {
+		tt.Advance(10 * time.Millisecond)
+		tt.Frame()
 	}
 }
 

@@ -1,10 +1,45 @@
 package cache
 
 import (
+	"database/sql"
+	"path/filepath"
 	"testing"
 
 	"github.com/LuckyCurve/value-screener/source"
 )
+
+// Balances written before the sign fix cannot be repaired without the
+// statements they came from, so an old file's balance table is dropped and
+// refetched. The ROE years were never affected and stay.
+func TestAnOldCacheDropsItsBalancesNotItsROE(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.db")
+	old, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Exec(schema); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Exec(`INSERT INTO roe (code, year, value) VALUES ('HK.00700', 2024, 0.24)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Exec(`INSERT INTO balance (code, year, cash, debt) VALUES ('HK.00700', 2024, 10, -3)`); err != nil {
+		t.Fatal(err)
+	}
+	old.Close()
+
+	c := Open(path)
+	defer c.Close()
+	if c == nil {
+		t.Fatal("an older cache should open")
+	}
+	if roe, _ := c.ROE("HK.00700"); roe[2024] != 0.24 {
+		t.Errorf("ROE years survive the migration, got %+v", roe)
+	}
+	if bal, _ := c.Balance("HK.00700"); len(bal) != 0 {
+		t.Errorf("a differently-signed debt must not survive, got %+v", bal)
+	}
+}
 
 func TestROERoundTrips(t *testing.T) {
 	c := OpenMemory()

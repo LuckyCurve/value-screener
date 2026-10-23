@@ -33,6 +33,20 @@ CREATE TABLE IF NOT EXISTS failures (
     at TEXT NOT NULL
 );`
 
+// schemaVersion is stored in SQLite's user_version. A version below it means
+// the file was written under a convention since found wrong, and the facts it
+// holds cannot be told apart from the right ones: they are dropped and fetched
+// again.
+const schemaVersion = 1
+
+// migrations brings an older cache up to schemaVersion. Version 1: balance
+// rows used to be written with Hong Kong debt negated, which made the net-cash
+// test pass every Hong Kong stock; there is no way to repair a stored sign
+// without the statement it came from.
+var migrations = map[int]string{
+	0: `DELETE FROM balance;`,
+}
+
 // Cache is a SQLite database of closed fiscal years.
 type Cache struct {
 	mu sync.Mutex
@@ -53,7 +67,33 @@ func Open(path string) *Cache {
 		db.Close()
 		return nil
 	}
+	if err := migrate(db); err != nil {
+		db.Close()
+		return nil
+	}
 	return &Cache{db: db}
+}
+
+// migrate applies every step between the file's version and this one.
+func migrate(db *sql.DB) error {
+	var version int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return err
+	}
+	for v := version; v < schemaVersion; v++ {
+		step, ok := migrations[v]
+		if !ok {
+			return fmt.Errorf("no migration from cache version %d", v)
+		}
+		if _, err := db.Exec(step); err != nil {
+			return err
+		}
+	}
+	if version != schemaVersion {
+		_, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion))
+		return err
+	}
+	return nil
 }
 
 // OpenMemory opens a cache that lives as long as the process, for tests.

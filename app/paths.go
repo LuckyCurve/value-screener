@@ -155,10 +155,9 @@ func DefaultScreen() Screen {
 		}
 		defer l.close()
 		res, err := l.screen.Run(ctx, func(i, n int, msg string) { progress(i, n, msg) })
-		if err != nil {
-			return engine.Result{}, dataLayerError(err)
-		}
-		return res, nil
+		// The result stands even when the run failed or was stopped: it
+		// carries every stock that was judged before that.
+		return res, dataLayerError(err)
 	}
 }
 

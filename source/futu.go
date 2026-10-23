@@ -45,15 +45,17 @@ type packet struct {
 	} `json:"stocks"`
 }
 
-// Candidates runs the first pass.
+// Candidates runs the first pass. A cancelled run returns whatever the
+// channel had written with the error, so the caller can tell a stop from a
+// failure.
 func (f Futu) Candidates(ctx context.Context, q Query, progress Progress) ([]Candidate, error) {
 	data, err := f.run(ctx, "candidates", q, nil, 0, progress)
-	if err != nil {
+	if len(data) == 0 {
 		return nil, err
 	}
-	p, err := decode(data)
-	if err != nil {
-		return nil, err
+	p, perr := decode(data)
+	if perr != nil {
+		return nil, perr
 	}
 	out := make([]Candidate, 0, len(p.Stocks))
 	for _, s := range p.Stocks {
@@ -61,7 +63,7 @@ func (f Futu) Candidates(ctx context.Context, q Query, progress Progress) ([]Can
 			Code: s.Code, Name: s.Name, PE: s.PE, PB: s.PB, MarketCap: s.MarketCap,
 		})
 	}
-	return out, nil
+	return out, err
 }
 
 // Figures fetches the yearly reports and today's valuation for codes.
@@ -69,13 +71,15 @@ func (f Futu) Figures(ctx context.Context, q Query, codes []string, progress Pro
 	if len(codes) == 0 {
 		return nil, nil
 	}
+	// A cancelled fetch returns the stocks it reached with the error; they
+	// are judged like any other answer.
 	data, err := f.run(ctx, "figures", q, codes, 0, progress)
-	if err != nil {
+	if len(data) == 0 {
 		return nil, err
 	}
-	p, err := decode(data)
-	if err != nil {
-		return nil, err
+	p, perr := decode(data)
+	if perr != nil {
+		return nil, perr
 	}
 	out := make([]Annual, 0, len(p.Stocks))
 	for _, s := range p.Stocks {
@@ -103,7 +107,7 @@ func (f Futu) Figures(ctx context.Context, q Query, codes []string, progress Pro
 		}
 		out = append(out, a)
 	}
-	return out, nil
+	return out, err
 }
 
 func (f Futu) run(ctx context.Context, command string, q Query, codes []string,

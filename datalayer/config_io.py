@@ -16,7 +16,6 @@ DEFAULTS = {
     "roe_min": 0.20,
     "roe_years": 15,
     "roe_slack": 0,
-    "coarse_roe_min": 0.15,
     "cash_years": 10,
     "percentile_years": 10,
 }
@@ -58,10 +57,16 @@ def validate(criteria: dict) -> None:
     if pe_max is None or pe_max <= 0:
         raise ValueError(f"pe_max must be positive, got {pe_max}")
 
-    for name in ("roe_min", "coarse_roe_min"):
-        value = criteria.get(name)
-        if value is None or value <= 0:
-            raise ValueError(f"{name} must be positive, got {value}")
+    roe_min = criteria.get("roe_min")
+    if roe_min is None or roe_min <= 0:
+        raise ValueError(f"roe_min must be positive, got {roe_min}")
+
+    roe_years = criteria.get("roe_years")
+    if not isinstance(roe_years, int) or roe_years < 1:
+        raise ValueError(f"roe_years must be at least 1, got {roe_years}")
+    slack = criteria.get("roe_slack")
+    if not isinstance(slack, int) or not 0 <= slack < roe_years:
+        raise ValueError(f"roe_slack must be in [0, roe_years), got {slack}")
 
     years = criteria.get("percentile_years")
     if years not in (0, *VALID_PERCENTILE_YEARS):

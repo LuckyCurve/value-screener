@@ -73,6 +73,30 @@ column cannot quietly reintroduce a price.
 A refusal ("not covered", "OTC quotes unavailable") is also a fact worth
 keeping, in `failures`, so a retry can clear it.
 
+A stored fact is only worth keeping if the convention behind it is right.
+`cache.schemaVersion` is bumped when a convention turns out to be wrong (once:
+Hong Kong debt was negated, making the net-cash test pass every HK stock), and
+the migration drops that table so the values are fetched again.
+
+Balance figures are magnitudes, in `futuclient.balance_series`. A statement's
+own sign is Futu's convention — Hong Kong reports a borrowing positive, the US
+labels it with a minus — and a rule that depends on it would pass one exchange
+and fail another.
+
+## Stopping
+
+Cancel must stop the work, not merely stop waiting for it. A frozen data layer
+is a bootloader that re-execs the real program, so `runner` puts the child in a
+job object (Windows) or its own process group (Unix) and kills the tree:
+killing only the process Go started would leave the one holding the OpenD
+connection running to the end.
+
+The result survives the stop. The data layer writes the packet after every
+stock, `runner` reads it back with `ctx.Err()`, `screener` returns the verdicts
+it reached, and `app` shows them with a "stopped early" note. Anything that
+throws away a partial result — `return engine.Result{}, err` on any error — is
+a bug: a stop after forty stocks must show forty.
+
 ## Adding a channel
 
 1. Write the type in `source/`, implementing `Source`.

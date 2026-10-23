@@ -47,6 +47,21 @@ func TestShots(t *testing.T) {
 			_ = tt.Click("No data (1)")
 			_ = tt.Click("Tencent (ADR)")
 		}},
+		{"stopped", func() *App {
+			a := newTestApp()
+			a.Screen = func(context.Context, config.Criteria, func(int, int, string)) (engine.Result, error) {
+				return sample(), context.Canceled
+			}
+			return a
+		}, nil},
+		{"stopping", func() *App {
+			a := newTestApp()
+			a.Screen = func(ctx context.Context, _ config.Criteria, _ func(int, int, string)) (engine.Result, error) {
+				<-ctx.Done()
+				select {} // the child has not died yet
+			}
+			return a
+		}, func(tt *ui.Tester) { _ = tt.Click("Cancel") }},
 	}
 
 	if err := os.MkdirAll(dir, 0o755); err != nil {

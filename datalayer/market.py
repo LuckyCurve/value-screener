@@ -23,8 +23,10 @@ CASH_HK = ("现金及等价物", "定期存款-流动资产", "定期存款-非�
 CASH_US = ("-现金和现金等价物", "-短期投资")
 CASH_CN = ("货币资金", "交易性金融资产")
 
-# Interest-bearing debt lines. Reported as negative numbers, so the caller
-# takes the magnitude.
+# Interest-bearing debt lines. Exchanges disagree on whether a liability
+# comes back positive or negative, so the caller takes each line's magnitude:
+# a borrowing is never negative, and a sign taken from the wrong convention
+# would make the net-cash test pass everything.
 DEBT_HK = (
     "银行贷款及透支",
     "短期融资租赁负债",

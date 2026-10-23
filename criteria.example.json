@@ -4,7 +4,6 @@
   "roe_min": 0.2,
   "roe_years": 15,
   "roe_slack": 0,
-  "coarse_roe_min": 0.15,
   "cash_years": 10,
   "percentile_years": 10
 }

@@ -19,6 +19,11 @@ The figures come from Futu's OpenD, which must be running and logged in on
 4. **Valuation** — today's PE placed among the stock's own daily PE history;
    the percentile sorts the results, cheapest first.
 
+The first pass asks OpenD for candidates by PE and by the same ROE floor, over
+at most twelve years — the most its screen endpoint accepts. The per-stock pass
+then applies the rules in full, including the slack. Cancelling a run stops the
+fetch at the stock in flight and keeps the stocks already judged.
+
 OpenD cannot answer the other three criteria from the usual checklist —
 management integrity, a focused strategy, auditor and incentive design — so
 they are not scored. The window shows what the data says and leaves those
@@ -115,7 +120,6 @@ field the window edits lives here:
 | `roe_min` | ROE floor, as a fraction | `0.20` |
 | `roe_years` | annual reports the ROE test looks at | `15` |
 | `roe_slack` | how many of those may miss the floor | `0` |
-| `coarse_roe_min` | first-pass prefilter floor | `0.15` |
 | `cash_years` | years the net-cash test looks at | `10` |
 | `percentile_years` | PE history window: 1, 3, 5 or 10 | `10` |
 

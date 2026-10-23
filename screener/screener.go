@@ -44,13 +44,13 @@ type Outstanding struct {
 
 // Run fetches, caches and judges. It reports progress as it goes so the
 // window can show which stock is in flight.
+//
+// A run the channel could not finish still returns the verdicts it reached,
+// with the error: a stop after forty stocks should show forty, not nothing.
 func (s Screen) Run(ctx context.Context, progress source.Progress) (engine.Result, error) {
 	all, err := s.Source.Candidates(ctx, s.Query(), progress)
-	if err != nil {
-		return engine.Result{}, err
-	}
 	if len(all) == 0 {
-		return engine.BuildResult(s.Criteria, nil), nil
+		return engine.BuildResult(s.Criteria, nil), err
 	}
 
 	verdicts := make([]engine.Verdict, 0, len(all))
@@ -74,9 +74,6 @@ func (s Screen) Run(ctx context.Context, progress source.Progress) (engine.Resul
 			codes[i] = c.Code
 		}
 		fetched, err = s.Source.Figures(ctx, s.Query(), codes, progress)
-		if err != nil {
-			return engine.Result{}, err
-		}
 	}
 
 	// The first pass already carries live PE and the name; the figures
@@ -100,17 +97,21 @@ func (s Screen) Run(ctx context.Context, progress source.Progress) (engine.Resul
 		}
 		verdicts = append(verdicts, v)
 	}
-	for _, c := range need {
-		if !got[c.Code] {
-			verdicts = append(verdicts, engine.Verdict{
-				Stock:       toStock(c),
-				Unavailable: "the channel returned no figures",
-			})
+	// A run that stopped part-way never asked about the rest, so they are
+	// not "no data": they are simply not in this report.
+	if err == nil {
+		for _, c := range need {
+			if !got[c.Code] {
+				verdicts = append(verdicts, engine.Verdict{
+					Stock:       toStock(c),
+					Unavailable: "the channel returned no figures",
+				})
+			}
 		}
 	}
 
 	verdicts = append(verdicts, known...)
-	return engine.BuildResult(s.Criteria, verdicts), nil
+	return engine.BuildResult(s.Criteria, verdicts), err
 }
 
 // Retry asks the channel again for one stock the run could not answer for.
@@ -153,7 +154,6 @@ func (s Screen) Query() source.Query {
 		ROEMin:          c.ROEMin,
 		ROEYears:        c.ROEYears,
 		ROESlack:        c.ROESlack,
-		CoarseROEMin:    c.CoarseROEMin,
 		CashYears:       c.CashYears,
 		PercentileYears: c.PercentileYears,
 	}
