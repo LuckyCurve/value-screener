@@ -12,7 +12,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 )
@@ -36,13 +35,12 @@ type Options struct {
 	// build) run directly instead of `python -m datalayer`. This is what
 	// lets the app ship as a single folder with no Python installed.
 	DataLayer string
-	// ConfigPath is the criteria file handed to the data layer.
-	ConfigPath string
+	// Args are the data layer's own arguments, such as its subcommand and
+	// the criteria file. They follow `-m datalayer` for the Python package
+	// and lead for a frozen binary.
+	Args []string
 	// OutPath receives the dataset JSON.
 	OutPath string
-	// Limit stops after N candidates. Zero fetches them all; tests and a
-	// smoke run use a small one.
-	Limit int
 	// OnEvent, when set, is called for each progress line as it arrives.
 	OnEvent func(Event)
 }
@@ -54,22 +52,15 @@ type Options struct {
 func Run(ctx context.Context, dir string, opts Options) ([]byte, error) {
 	program := opts.DataLayer
 	var args []string
-	if program != "" {
-		args = append(args, "--out", opts.OutPath)
-	} else {
+	if program == "" {
 		python, err := resolvePython(dir, opts.Python)
 		if err != nil {
 			return nil, err
 		}
 		program = python
-		args = append(args, "-m", "datalayer", "--out", opts.OutPath)
+		args = append(args, "-m", "datalayer")
 	}
-	if opts.ConfigPath != "" {
-		args = append(args, "--config", opts.ConfigPath)
-	}
-	if opts.Limit > 0 {
-		args = append(args, "--limit", strconv.Itoa(opts.Limit))
-	}
+	args = append(args, opts.Args...)
 
 	cmd := exec.CommandContext(ctx, program, args...)
 	cmd.Dir = dir

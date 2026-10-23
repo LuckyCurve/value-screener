@@ -107,3 +107,45 @@ func TestSummaryNamesTheCriterion(t *testing.T) {
 		t.Fatalf("summary should name the cause, got %q", got)
 	}
 }
+
+func TestAMissingStockIsItsOwnGroup(t *testing.T) {
+	v := Verdict{Stock: Stock{Code: "US.TCEHY"}, Unavailable: "OTC not covered"}
+	r := BuildResult(criteria(), []Verdict{
+		v,
+		{Stock: Stock{Code: "HK.00700"}, Passed: true},
+	})
+	if len(r.Missing) != 1 || len(r.Passed) != 1 || len(r.Rejected) != 0 {
+		t.Fatalf("got passed %d rejected %d missing %d",
+			len(r.Passed), len(r.Rejected), len(r.Missing))
+	}
+	if r.Missing[0].Stock.Code != "US.TCEHY" {
+		t.Errorf("got %+v", r.Missing[0])
+	}
+}
+
+func TestReplaceMovesAStockToItsNewGroup(t *testing.T) {
+	r := BuildResult(criteria(), []Verdict{
+		{Stock: Stock{Code: "US.TCEHY"}, Unavailable: "OTC not covered"},
+		{Stock: Stock{Code: "HK.00700"}, Passed: true},
+	})
+	ok := r.Replace(Verdict{Stock: Stock{Code: "US.TCEHY"}, Passed: true})
+	if !ok {
+		t.Fatal("the code was not found")
+	}
+	if len(r.Missing) != 0 {
+		t.Errorf("it should have left the missing group: %+v", r.Missing)
+	}
+	if len(r.Passed) != 2 {
+		t.Errorf("it should have joined the passed group: %+v", r.Passed)
+	}
+}
+
+func TestReplaceIgnoresAnUnknownCode(t *testing.T) {
+	r := BuildResult(criteria(), []Verdict{{Stock: Stock{Code: "HK.00700"}, Passed: true}})
+	if r.Replace(Verdict{Stock: Stock{Code: "HK.09988"}, Passed: true}) {
+		t.Error("an unknown code should not be replaced")
+	}
+	if len(r.Passed) != 1 {
+		t.Errorf("nothing should have been added: %+v", r.Passed)
+	}
+}

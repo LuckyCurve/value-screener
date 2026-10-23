@@ -177,3 +177,20 @@ func TestValuationCarriesThroughWithoutJudging(t *testing.T) {
 		t.Fatal("a high percentile must not fail a stock on its own")
 	}
 }
+
+func TestUnavailableStockIsRejectedWithItsReason(t *testing.T) {
+	v := EvaluateData(Stock{Code: "US.TCEHY", Name: "Tencent(ADR)", PE: 13},
+		ROEReport{}, BalanceReport{}, config.Default(), "暂不提供美股 OTC 市场行情 TCEHY")
+	if v.Passed {
+		t.Fatal("a stock with no figures must not pass")
+	}
+	if v.Unavailable == "" {
+		t.Fatal("the reason should be kept")
+	}
+	if len(v.Failures) != 0 {
+		t.Errorf("it missed no rule; it had no figures: %+v", v.Failures)
+	}
+	if got := v.Summary(); got != "no data: 暂不提供美股 OTC 市场行情 TCEHY" {
+		t.Errorf("summary %q should name the reason", got)
+	}
+}

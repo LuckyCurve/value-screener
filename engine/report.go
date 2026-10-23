@@ -7,12 +7,18 @@ import (
 	"github.com/LuckyCurve/value-screener/config"
 )
 
-// Result is one screening run: the criteria that produced it, what passed and
-// what did not.
+// Result is one screening run: the criteria that produced it, what passed,
+// what did not, and what the channel could not answer for at all.
+//
+// Missing is kept apart from Rejected because it is a different kind of fact:
+// a rejected stock was measured against the rules and fell short, while a
+// missing one was never measured. Retrying is worth offering for the second
+// and not the first.
 type Result struct {
 	Criteria config.Criteria `json:"criteria"`
 	Passed   []Verdict       `json:"passed"`
 	Rejected []Verdict       `json:"rejected"`
+	Missing  []Verdict       `json:"missing,omitempty"`
 }
 
 // SortPassed orders passing stocks cheapest first by valuation percentile,
@@ -34,13 +40,17 @@ func SortPassed(vs []Verdict) {
 	})
 }
 
-// BuildResult splits verdicts into passed and rejected, and sorts both.
+// BuildResult splits verdicts into passed, rejected and missing, and sorts
+// them.
 func BuildResult(c config.Criteria, verdicts []Verdict) Result {
 	r := Result{Criteria: c}
 	for _, v := range verdicts {
-		if v.Passed {
+		switch {
+		case v.Unavailable != "":
+			r.Missing = append(r.Missing, v)
+		case v.Passed:
 			r.Passed = append(r.Passed, v)
-		} else {
+		default:
 			r.Rejected = append(r.Rejected, v)
 		}
 	}
@@ -48,7 +58,32 @@ func BuildResult(c config.Criteria, verdicts []Verdict) Result {
 	sort.SliceStable(r.Rejected, func(i, j int) bool {
 		return r.Rejected[i].Stock.Code < r.Rejected[j].Stock.Code
 	})
+	sort.SliceStable(r.Missing, func(i, j int) bool {
+		return r.Missing[i].Stock.Code < r.Missing[j].Stock.Code
+	})
 	return r
+}
+
+// Replace swaps one stock's verdict for its code, puts it in the group its
+// new verdict belongs to, and returns whether the code was found.
+func (r *Result) Replace(v Verdict) bool {
+	code := v.Stock.Code
+	found := false
+	all := make([]Verdict, 0, len(r.Passed)+len(r.Rejected)+len(r.Missing)+1)
+	for _, vs := range [][]Verdict{r.Passed, r.Rejected, r.Missing} {
+		for _, old := range vs {
+			if old.Stock.Code == code {
+				found = true
+				continue
+			}
+			all = append(all, old)
+		}
+	}
+	if !found {
+		return false
+	}
+	*r = BuildResult(r.Criteria, append(all, v))
+	return true
 }
 
 // ROERange returns the lowest and highest judged ROE, for summarising a stock
@@ -97,6 +132,9 @@ func NetCashLowest(b BalanceReport, n int) (float64, bool) {
 func (v Verdict) Summary() string {
 	if v.Passed {
 		return "passed"
+	}
+	if v.Unavailable != "" {
+		return "no data: " + v.Unavailable
 	}
 	if len(v.Failures) == 0 {
 		return "rejected"

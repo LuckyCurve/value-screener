@@ -12,3 +12,11 @@ report.html
 # Build output
 dist/
 build/
+
+# The frozen data layer, packed into the executable at build time.
+app/datalayer.bin
+app/*.syso
+
+# A run's own folder and the cache it fills.
+data/
+value-screener-cache.db

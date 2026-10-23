@@ -106,6 +106,15 @@ func CheckNetCash(b BalanceReport, c config.Criteria) ([]Failure, []string) {
 	return nil, nil
 }
 
+// EvaluateData applies every criterion to one stock, leaving out a stock
+// whose figures never arrived.
+func EvaluateData(s Stock, roe ROEReport, bal BalanceReport, c config.Criteria, unavailable string) Verdict {
+	if unavailable != "" {
+		return Verdict{Stock: s, ROE: roe, Balance: bal, Unavailable: unavailable}
+	}
+	return Evaluate(s, roe, bal, c)
+}
+
 // Evaluate applies every criterion to one stock.
 func Evaluate(s Stock, roe ROEReport, bal BalanceReport, c config.Criteria) Verdict {
 	v := Verdict{Stock: s, ROE: roe, Balance: bal}

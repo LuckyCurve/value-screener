@@ -117,9 +117,9 @@ func TestRunUsesTheDataLayerBinaryWhenGiven(t *testing.T) {
 	}
 
 	data, err := Run(context.Background(), dir, Options{
-		DataLayer:  script,
-		ConfigPath: filepath.Join(dir, "criteria.json"),
-		OutPath:    out,
+		DataLayer: script,
+		Args:      []string{"figures", "--config", filepath.Join(dir, "criteria.json")},
+		OutPath:   out,
 	})
 	if err != nil {
 		t.Fatalf("run: %v", err)
@@ -132,8 +132,8 @@ func TestRunUsesTheDataLayerBinaryWhenGiven(t *testing.T) {
 		t.Fatalf("the binary never ran: %v", err)
 	}
 	got := string(args)
-	if strings.Contains(got, "-m datalayer") || !strings.Contains(got, "--out") {
-		t.Errorf("args %q should name --out and not python -m", got)
+	if strings.Contains(got, "-m datalayer") || !strings.Contains(got, "figures") {
+		t.Errorf("args %q should be the layer's own, not a python invocation", got)
 	}
 }
 
@@ -158,6 +158,7 @@ func TestFailureReportsTheChildsOwnWords(t *testing.T) {
 
 	_, err := Run(context.Background(), dir, Options{
 		DataLayer: script,
+		Args:      []string{"figures"},
 		OutPath:   filepath.Join(dir, "dataset.json"),
 	})
 	if err == nil {

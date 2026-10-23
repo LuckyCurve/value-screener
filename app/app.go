@@ -31,6 +31,11 @@ const (
 type Screen func(ctx context.Context, c config.Criteria,
 	progress func(index, total int, message string)) (engine.Result, error)
 
+// Retrier asks the channel again for one stock, for the codes a run could
+// not answer for.
+type Retrier func(ctx context.Context, c config.Criteria,
+	stock engine.Stock) (engine.Verdict, error)
+
 // App is the window's state.
 type App struct {
 	// The form. These are the only places the criteria live while the user
@@ -44,8 +49,11 @@ type App struct {
 	HK, US   bool
 	CN       bool
 
-	// Screen is set by New to run the Python data layer and the engine.
+	// Screen is set by New to run the data layer and the engine.
 	Screen Screen
+	// Retry asks the channel again for one stock the run could not answer
+	// for. New wires the real one; a test may leave it nil.
+	Retry Retrier
 
 	mu       sync.Mutex
 	status   Status
@@ -58,14 +66,18 @@ type App struct {
 	cancel   context.CancelFunc
 	done     chan struct{}
 
-	// tab is 0 for passing stocks, 1 for rejected ones.
+	// tab is 0 for passing stocks, 1 for rejected ones, 2 for the ones the
+	// channel could not answer for.
 	tab int
-	// passedChosen and rejectedChosen are the rows picked in each table,
-	// -1 for none, kept apart so switching tabs keeps both choices.
-	passedChosen   int
-	rejectedChosen int
+	// chosen is the row picked in each table, -1 for none, kept apart so
+	// switching tabs keeps every choice.
+	chosen [3]int
+	// detail is 0 for no dialog, 1 for a stock's figures, 2 for a refusal.
+	detail int
+	// retrying is the code being fetched again, "" for none.
+	retrying string
 
-	passed, rejected ui.ListState
+	passed, rejected, missing ui.ListState
 
 	// services lets the run goroutine ask for a frame.
 	services ui.Services
@@ -73,14 +85,14 @@ type App struct {
 
 // New returns an app on the shipped criteria, wired to the real data layer.
 func New() *App {
-	a := &App{Screen: DefaultScreen()}
+	a := &App{Screen: DefaultScreen(), Retry: DefaultRetry()}
 	a.load(config.Default())
 	return a
 }
 
 // NewFrom returns an app on the given criteria, wired to the real data layer.
 func NewFrom(c config.Criteria) *App {
-	a := &App{Screen: DefaultScreen()}
+	a := &App{Screen: DefaultScreen(), Retry: DefaultRetry()}
 	a.load(c)
 	return a
 }
@@ -103,26 +115,46 @@ func (a *App) load(c config.Criteria) {
 			a.CN = true
 		}
 	}
-	a.passedChosen, a.rejectedChosen = -1, -1
-	a.passed.Selected = &a.passedChosen
-	a.passed.Key = func(row int) any { return a.key(true, row) }
-	a.rejected.Selected = &a.rejectedChosen
-	a.rejected.Key = func(row int) any { return a.key(false, row) }
+	a.chosen = [3]int{-1, -1, -1}
+	a.passed.Selected = &a.chosen[0]
+	a.passed.Key = func(row int) any { return a.key(0, row) }
+	a.rejected.Selected = &a.chosen[1]
+	a.rejected.Key = func(row int) any { return a.key(1, row) }
+	a.missing.Selected = &a.chosen[2]
+	a.missing.Key = func(row int) any { return a.key(2, row) }
+}
+
+// group is which list of a finished run a row belongs to.
+type group int
+
+const (
+	groupPassed group = iota
+	groupRejected
+	groupMissing
+)
+
+// rows returns the stocks of one group.
+func rows(r *engine.Result, g group) []engine.Verdict {
+	switch g {
+	case groupPassed:
+		return r.Passed
+	case groupMissing:
+		return r.Missing
+	default:
+		return r.Rejected
+	}
 }
 
 // key identifies a row by its code, so the choice follows a stock across runs
 // rather than sticking to a row number.
-func (a *App) key(passed bool, row int) string {
+func (a *App) key(g group, row int) string {
 	a.mu.Lock()
 	r := a.result
 	a.mu.Unlock()
 	if r == nil {
 		return fmt.Sprint(row)
 	}
-	vs := r.Rejected
-	if passed {
-		vs = r.Passed
-	}
+	vs := rows(r, g)
 	if row < 0 || row >= len(vs) {
 		return fmt.Sprint(row)
 	}
@@ -131,10 +163,7 @@ func (a *App) key(passed bool, row int) string {
 
 // chosenRow is the row picked in the table on show, -1 for none.
 func (a *App) chosenRow() int {
-	if a.tab == 1 {
-		return a.rejectedChosen
-	}
-	return a.passedChosen
+	return a.chosen[a.tab]
 }
 
 // Criteria reads the form back into the rule set.
@@ -220,8 +249,8 @@ func (a *App) Start() bool {
 	a.elapsed = ""
 	a.result = nil
 	a.mu.Unlock()
-	a.passedChosen, a.rejectedChosen = -1, -1
-	a.tab = 0
+	a.chosen = [3]int{-1, -1, -1}
+	a.detail, a.tab = 0, 0
 
 	go a.run(ctx, cancel, c, done)
 	return true
@@ -274,6 +303,66 @@ func (a *App) Cancel() {
 	}
 }
 
+// RetryStock asks the channel again for one stock the run could not answer
+// for, and puts whatever comes back in the group it now belongs to.
+func (a *App) RetryStock(code string) bool {
+	if a.Retry == nil {
+		return false
+	}
+
+	a.mu.Lock()
+	if a.running || a.retrying != "" || a.result == nil {
+		a.mu.Unlock()
+		return false
+	}
+	var stock engine.Stock
+	ok := false
+	for _, v := range a.result.Missing {
+		if v.Stock.Code == code {
+			stock, ok = v.Stock, true
+			break
+		}
+	}
+	if !ok {
+		a.mu.Unlock()
+		return false
+	}
+	a.retrying = code
+	ctx, cancel := context.WithCancel(context.Background())
+	a.cancel = cancel
+	a.mu.Unlock()
+	a.invalidate()
+
+	go func() {
+		v, err := a.Retry(ctx, a.Criteria(), stock)
+		cancel()
+
+		a.mu.Lock()
+		a.retrying, a.cancel = "", nil
+		if a.result != nil && a.status == statusFinished {
+			switch {
+			case err == nil:
+				a.result.Replace(v)
+			case !errors.Is(err, context.Canceled):
+				// The channel could not be reached at all: the stock keeps
+				// its place, and its row says what went wrong this time.
+				a.result.Replace(engine.Verdict{Stock: stock,
+					Unavailable: err.Error()})
+			}
+		}
+		a.mu.Unlock()
+		a.invalidate()
+	}()
+	return true
+}
+
+// Retrying is the code being fetched again, "" for none.
+func (a *App) Retrying() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.retrying
+}
+
 // Wait blocks until the run under way is done.
 func (a *App) Wait() {
 	a.mu.Lock()
@@ -300,16 +389,20 @@ func (a *App) View(c *ui.Context) {
 	a.mu.Unlock()
 	t := c.Theme()
 
-	ui.Row(c).Fill().Children(func() {
-		ui.Column(c).Width(356).FillHeight().Padding(22, 18, 18, 18).
-			Background(t.Surface).Gap(18).Children(func() {
-			a.brand(c, t)
-			a.form(c, t)
-		})
-		ui.Column(c).Grow(1).FillHeight().Padding(24, 20, 20, 20).Gap(16).Children(func() {
-			a.results(c, t)
+	ui.Column(c).Fill().Children(func() {
+		a.titleBar(c, t)
+		ui.Row(c).Fill().Grow(1).Children(func() {
+			ui.Column(c).Width(356).FillHeight().Padding(22, 18, 18, 18).
+				Background(t.Surface).Gap(18).Children(func() {
+				a.brand(c, t)
+				a.form(c, t)
+			})
+			ui.Column(c).Grow(1).FillHeight().Padding(24, 20, 20, 20).Gap(16).Children(func() {
+				a.results(c, t)
+			})
 		})
 	})
+	a.dialogs(c, t)
 }
 
 // brand is the app's header: mark, name, and what it screens.
@@ -514,21 +607,34 @@ func (a *App) finished(c *ui.Context, t *ui.Theme, r *engine.Result, elapsed str
 	ui.Row(c).Gap(10).Children(func() {
 		stat(c, t, "Passed", fmt.Sprint(len(r.Passed)), t.Success, iconCheck)
 		stat(c, t, "Rejected", fmt.Sprint(len(r.Rejected)), t.TextMuted, iconCross)
+		if len(r.Missing) > 0 {
+			stat(c, t, "No data", fmt.Sprint(len(r.Missing)), t.Warning, iconWarn)
+		}
 		if elapsed != "" {
 			stat(c, t, "Took", elapsed, t.TextMuted, iconClock)
 		}
 	})
 
-	ui.Tabs(c, &a.tab, fmt.Sprintf("Passed (%d)", len(r.Passed)),
-		fmt.Sprintf("Rejected (%d)", len(r.Rejected)))
+	labels := []string{
+		fmt.Sprintf("Passed (%d)", len(r.Passed)),
+		fmt.Sprintf("Rejected (%d)", len(r.Rejected)),
+	}
+	if len(r.Missing) > 0 {
+		labels = append(labels, fmt.Sprintf("No data (%d)", len(r.Missing)))
+	}
+	// A tab that is no longer drawn must not stay chosen.
+	if a.tab >= len(labels) {
+		a.tab = 0
+	}
+	ui.Tabs(c, &a.tab, labels...)
 
-	// The detail sits above the table so it stays put as the table scrolls.
-	a.detail(c, t, r)
-
-	if a.tab == 0 {
-		a.passedTable(c, t, r)
-	} else {
+	switch a.tab {
+	case 1:
 		a.rejectedTable(c, t, r)
+	case 2:
+		a.missingTable(c, t, r)
+	default:
+		a.passedTable(c, t, r)
 	}
 }
 
@@ -557,7 +663,7 @@ func (a *App) passedTable(c *ui.Context, t *ui.Theme, r *engine.Result) {
 		roe, cash = 4, 5
 	}
 
-	ui.Table(c, &a.passed, cols, len(r.Passed), func(row, col int) {
+	table := ui.Table(c, &a.passed, cols, len(r.Passed), func(row, col int) {
 		v := r.Passed[row]
 		switch col {
 		case 0:
@@ -594,6 +700,7 @@ func (a *App) passedTable(c *ui.Context, t *ui.Theme, r *engine.Result) {
 			}
 		}
 	}).Fill().Grow(1)
+	a.openOnChoice(table)
 }
 
 func (a *App) rejectedTable(c *ui.Context, t *ui.Theme, r *engine.Result) {
@@ -608,7 +715,7 @@ func (a *App) rejectedTable(c *ui.Context, t *ui.Theme, r *engine.Result) {
 		{Title: "Missed", Width: 150},
 		{Title: "Why"},
 	}
-	ui.Table(c, &a.rejected, cols, len(r.Rejected), func(row, col int) {
+	table := ui.Table(c, &a.rejected, cols, len(r.Rejected), func(row, col int) {
 		v := r.Rejected[row]
 		switch col {
 		case 0:
@@ -625,92 +732,299 @@ func (a *App) rejectedTable(c *ui.Context, t *ui.Theme, r *engine.Result) {
 			ui.Text(c, v.Summary()).SingleLine().TextColor(t.TextMuted)
 		}
 	}).Fill().Grow(1)
+	a.openOnChoice(table)
 }
 
-// detail shows one stock's figures year by year, so the choice can be judged
-// against the rules rather than taken on the table's word.
-func (a *App) detail(c *ui.Context, t *ui.Theme, r *engine.Result) {
-	vs := r.Passed
-	if a.tab == 1 {
-		vs = r.Rejected
+// missingTable is the stocks the channel could not answer for. They are a
+// group of their own because nothing was measured: the row says why, and its
+// button asks the channel again.
+func (a *App) missingTable(c *ui.Context, t *ui.Theme, r *engine.Result) {
+	if len(r.Missing) == 0 {
+		ui.Text(c, "The channel answered for every candidate.").
+			FontSize(13).TextColor(t.TextMuted)
+		return
 	}
-	n := a.chosenRow()
-	if n < 0 || n >= len(vs) {
+	retrying := a.Retrying()
+	cols := []ui.TableColumn{
+		{Title: "Code", Width: 100},
+		{Title: "Name", Width: 160},
+		{Title: "PE", Width: 70, Align: ui.End},
+		{Title: "Why not"},
+		{Title: "", Width: 96},
+	}
+	table := ui.Table(c, &a.missing, cols, len(r.Missing), func(row, col int) {
+		v := r.Missing[row]
+		switch col {
+		case 0:
+			ui.Text(c, v.Stock.Code).SingleLine()
+		case 1:
+			ui.Text(c, v.Stock.Name).SingleLine()
+		case 2:
+			ui.Textf(c, "%.1f", v.Stock.PE)
+		case 3:
+			ui.Text(c, v.Unavailable).SingleLine().TextColor(t.Warning)
+		case 4:
+			if retrying == v.Stock.Code {
+				ui.Text(c, "Asking…").FontSize(12).TextColor(t.TextMuted)
+				return
+			}
+			b := ui.ButtonBase(c).Padding(3, 8).Radius(6).
+				Label("Retry " + v.Stock.Code)
+			if b.Hovered() {
+				b.Background(t.SurfaceHover)
+			}
+			b.Children(func() {
+				ui.Row(c).Gap(5).AlignItems(ui.Center).Children(func() {
+					ui.Icon(c, iconRetry).FontSize(12).TextColor(t.TextMuted)
+					ui.Text(c, "Retry").FontSize(12).TextColor(t.Text)
+				})
+			})
+			if b.Clicked() && retrying == "" {
+				a.RetryStock(v.Stock.Code)
+			}
+		}
+	}).Fill().Grow(1)
+	a.openOnChoice(table)
+}
+
+// openOnChoice opens the dialog for the row just chosen: picking a stock is
+// asking to see it.
+func (a *App) openOnChoice(table ui.Element) {
+	if (table.Changed() || table.Submitted()) && a.chosenRow() >= 0 {
+		a.openDetail()
+	}
+}
+
+// openDetail opens the dialog for the row chosen in the tab on show.
+func (a *App) openDetail() {
+	a.mu.Lock()
+	r := a.result
+	tab, n := a.tab, a.chosen[a.tab]
+	a.mu.Unlock()
+	if r == nil || n < 0 {
+		return
+	}
+	vs := rows(r, group(tab))
+	if n >= len(vs) {
+		return
+	}
+	a.detail = 1
+	if vs[n].Unavailable != "" {
+		a.detail = 2
+	}
+}
+
+// closeDetail closes the dialog and lets the same row be picked again.
+func (a *App) closeDetail() {
+	a.detail = 0
+	a.chosen[a.tab] = -1
+}
+
+// dialogs draws the dialog that may be open over the window.
+func (a *App) dialogs(c *ui.Context, t *ui.Theme) {
+	a.mu.Lock()
+	r, tab, n := a.result, a.tab, a.chosen[a.tab]
+	a.mu.Unlock()
+	if a.detail == 0 || r == nil || n < 0 {
+		return
+	}
+	vs := rows(r, group(tab))
+	if n >= len(vs) {
 		return
 	}
 	v := vs[n]
 
-	card(c, t, 12, func() {
-		ui.Column(c).Gap(10).Children(func() {
-			ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
-				ui.Column(c).Grow(1).Gap(1).Children(func() {
-					ui.Text(c, v.Stock.Name).FontSize(15).Bold()
-					ui.Text(c, v.Stock.Code).FontSize(11).TextColor(t.TextMuted)
-				})
-				if v.Valuation != nil {
-					chip(c, t, fmt.Sprintf("PE %.1f", v.Stock.PE), t.TextMuted)
-					chip(c, t, fmt.Sprintf("%d-yr avg %.1f",
-						r.Criteria.PercentileYears, v.Valuation.Average), t.TextMuted)
-				} else {
-					chip(c, t, fmt.Sprintf("PE %.1f", v.Stock.PE), t.TextMuted)
-				}
-			})
-
-			for _, f := range v.Failures {
-				ui.Row(c).Gap(6).AlignItems(ui.Start).Children(func() {
-					ui.Icon(c, iconCross).FontSize(12).TextColor(t.Danger)
-					ui.Text(c, f.Criterion+": "+f.Reason).FontSize(12).
-						TextColor(t.Danger).Grow(1)
-				})
+	open := a.detail != 0
+	ui.Modal(c, &open, func() {
+		ui.Column(c).Width(dialogWidth(c)).Gap(14).Children(func() {
+			a.dialogHead(c, t, r, v)
+			ui.Divider(c)
+			if v.Unavailable != "" {
+				a.dialogMissing(c, t, v)
+			} else {
+				a.dialogFigures(c, t, r, v)
 			}
-			for _, note := range v.Notes {
-				ui.Row(c).Gap(6).AlignItems(ui.Start).Children(func() {
-					ui.Icon(c, iconInfo).FontSize(12).TextColor(t.Warning)
-					ui.Text(c, note).FontSize(12).TextColor(t.TextMuted).Grow(1)
-				})
-			}
-
-			// Capped so the table below stays in view; the years scroll.
-			ui.Scroll(c).Height(112).FillWidth().Children(func() {
-				years := make([]int, 0, len(v.ROE.ROE))
-				for y := range v.ROE.ROE {
-					years = append(years, y)
-				}
-				sort.Sort(sort.Reverse(sort.IntSlice(years)))
-				ui.Column(c).Gap(1).Children(func() {
-					for _, y := range years {
-						money0 := fmt.Sprintf("%d", y)
-						roe := v.ROE.ROE[y]
-						bal, ok := v.Balance.Years[y]
-						row := ui.Row(c).Gap(0).Children(func() {
-							ui.Text(c, money0).Width(52).FontSize(12).TextColor(t.TextMuted)
-							roeColour := t.Text
-							if roe < r.Criteria.ROEMin {
-								roeColour = t.Warning
-							}
-							ui.Textf(c, "ROE %.1f%%", roe*100).Width(104).
-								FontSize(12).TextColor(roeColour)
-							if !ok {
-								ui.Text(c, "—").FontSize(12).TextColor(t.TextMuted)
-								return
-							}
-							net := bal.Cash - bal.Debt
-							ui.Textf(c, "cash %s", money(bal.Cash)).Width(104).
-								FontSize(12).TextColor(t.TextMuted)
-							ui.Textf(c, "debt %s", money(bal.Debt)).Width(104).
-								FontSize(12).TextColor(t.TextMuted)
-							netColour := t.Success
-							if net <= 0 {
-								netColour = t.Danger
-							}
-							ui.Textf(c, "net %s", money(net)).FontSize(12).TextColor(netColour)
-						})
-						_ = row
-					}
-				})
-			})
 		})
 	})
+	if !open {
+		a.detail = 0
+	}
+}
+
+// dialogWidth is wide enough for a year's row and short of the window's
+// edges.
+func dialogWidth(c *ui.Context) float32 {
+	w, _ := c.Size()
+	if w-100 < 580 {
+		return w - 100
+	}
+	return 580
+}
+
+// dialogHead names the stock, how cheap it is, and closes the dialog.
+func (a *App) dialogHead(c *ui.Context, t *ui.Theme, r *engine.Result, v engine.Verdict) {
+	ui.Row(c).Gap(10).AlignItems(ui.Start).Children(func() {
+		ui.Column(c).Grow(1).Gap(2).Children(func() {
+			ui.Text(c, v.Stock.Name).FontSize(19).Bold().SingleLine()
+			ui.Text(c, v.Stock.Code).FontSize(12).TextColor(t.TextMuted)
+		})
+
+		if v.Stock.PE > 0 {
+			chip(c, t, fmt.Sprintf("PE %.1f", v.Stock.PE), t.TextMuted)
+		}
+		if v.Valuation != nil {
+			colour := t.Text
+			switch p := v.Valuation.Percentile; {
+			case p < 30:
+				colour = t.Success
+			case p > 70:
+				colour = t.Danger
+			}
+			chip(c, t, fmt.Sprintf("%.0f%% of its %.0f-yr PE",
+				v.Valuation.Percentile, float64(r.Criteria.PercentileYears)), colour)
+		}
+
+		b := ui.ButtonBase(c).Size(28, 28).Radius(6).Center().Label("Close")
+		if b.Hovered() {
+			b.Background(t.SurfaceHover)
+		}
+		b.Children(func() { ui.Icon(c, iconClose).FontSize(11).TextColor(t.TextMuted) })
+		if b.Clicked() {
+			a.closeDetail()
+		}
+	})
+}
+
+// dialogFigures is the year-by-year table: every figure the rules looked at,
+// with the years that broke one marked.
+func (a *App) dialogFigures(c *ui.Context, t *ui.Theme, r *engine.Result, v engine.Verdict) {
+	for _, f := range v.Failures {
+		ui.Row(c).Gap(7).AlignItems(ui.Start).Children(func() {
+			ui.Icon(c, iconCross).FontSize(13).TextColor(t.Danger)
+			ui.Text(c, f.Criterion+": "+detailReason(f)).FontSize(12).
+				TextColor(t.Danger).Grow(1)
+		})
+	}
+	for _, note := range v.Notes {
+		ui.Row(c).Gap(7).AlignItems(ui.Start).Children(func() {
+			ui.Icon(c, iconInfo).FontSize(13).TextColor(t.Warning)
+			ui.Text(c, note).FontSize(12).TextColor(t.TextMuted).Grow(1)
+		})
+	}
+
+	years := make([]int, 0, len(v.ROE.ROE)+len(v.Balance.Years))
+	seen := map[int]bool{}
+	for y := range v.ROE.ROE {
+		years, seen[y] = append(years, y), true
+	}
+	for y := range v.Balance.Years {
+		if !seen[y] {
+			years = append(years, y)
+		}
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(years)))
+	if len(years) == 0 {
+		ui.Text(c, "No annual figures were reported.").FontSize(13).
+			TextColor(t.TextMuted)
+		return
+	}
+
+	failed := map[int]bool{}
+	for _, f := range v.Failures {
+		for _, y := range f.Years {
+			failed[y] = true
+		}
+	}
+
+	ui.Row(c).Gap(0).Padding(0, 6, 6, 6).Children(func() {
+		ui.Text(c, "YEAR").Width(60).FontSize(10).Bold().TextColor(t.TextMuted)
+		ui.Text(c, "ROE").Width(90).FontSize(10).Bold().TextColor(t.TextMuted)
+		ui.Text(c, "CASH").Width(90).FontSize(10).Bold().TextColor(t.TextMuted)
+		ui.Text(c, "DEBT").Width(90).FontSize(10).Bold().TextColor(t.TextMuted)
+		ui.Text(c, "NET CASH").FontSize(10).Bold().TextColor(t.TextMuted)
+	})
+	ui.Divider(c)
+
+	// As tall as the years need, up to a fixed ceiling: a stock with two
+	// reports should not open a dialog two thirds empty.
+	height := float32(len(years))*29 + 4
+	if height > 268 {
+		height = 268
+	}
+	ui.Scroll(c).Height(height).FillWidth().Children(func() {
+		ui.Column(c).Gap(1).Children(func() {
+			for _, y := range years {
+				roe, hasROE := v.ROE.ROE[y]
+				bal, hasBal := v.Balance.Years[y]
+
+				row := ui.Row(c).Gap(0).Padding(5, 6).Radius(4)
+				if failed[y] {
+					row.Background(ui.RGBA(220, 38, 38, 0.08))
+				}
+				row.Children(func() {
+					ui.Textf(c, "%d", y).Width(60).FontSize(12).TextColor(t.TextMuted)
+					if !hasROE {
+						ui.Text(c, "—").Width(90).FontSize(12).TextColor(t.TextMuted)
+					} else {
+						colour := t.Text
+						if roe < r.Criteria.ROEMin {
+							colour = t.Warning
+						}
+						ui.Textf(c, "%.1f%%", roe*100).Width(90).
+							FontSize(12).TextColor(colour)
+					}
+					if !hasBal {
+						ui.Text(c, "—").FontSize(12).TextColor(t.TextMuted)
+						return
+					}
+					ui.Text(c, money(bal.Cash)).Width(90).FontSize(12).
+						TextColor(t.TextMuted)
+					ui.Text(c, money(bal.Debt)).Width(90).FontSize(12).
+						TextColor(t.TextMuted)
+					net := bal.Cash - bal.Debt
+					ui.Text(c, money(net)).FontSize(12).TextColor(netColour(t, net))
+				})
+			}
+		})
+	})
+}
+
+// detailReason names the years a rule was broken in, when it has them.
+func detailReason(f engine.Failure) string {
+	if len(f.Years) == 0 {
+		return f.Reason
+	}
+	return fmt.Sprintf("%s (%v)", f.Reason, f.Years)
+}
+
+// dialogMissing says why a stock has no figures, and offers to ask again.
+func (a *App) dialogMissing(c *ui.Context, t *ui.Theme, v engine.Verdict) {
+	ui.Row(c).Gap(9).AlignItems(ui.Start).Children(func() {
+		ui.Icon(c, iconWarn).FontSize(15).TextColor(t.Warning)
+		ui.Column(c).Grow(1).Gap(5).Children(func() {
+			ui.Text(c, "The channel returned no figures").FontSize(13).Bold()
+			ui.Text(c, v.Unavailable).FontSize(12).TextColor(t.TextMuted).Selectable()
+		})
+	})
+
+	retrying := a.Retrying() == v.Stock.Code
+	b := ui.PrimaryButton(c, "").Width(150).Height(34)
+	b.Children(func() {
+		ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
+			ui.Icon(c, iconRetry).FontSize(13).TextColor(t.AccentText)
+			label := "Ask again"
+			if retrying {
+				label = "Asking…"
+			}
+			ui.Text(c, label).TextColor(t.AccentText).SingleLine()
+		})
+	})
+	if retrying {
+		b.Disabled(true)
+	}
+	if b.Clicked() {
+		a.RetryStock(v.Stock.Code)
+	}
 }
 
 // netColour marks a net-cash figure: red where debt has overtaken cash.

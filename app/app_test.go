@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -299,7 +300,7 @@ func TestClickingAStockShowsItsYears(t *testing.T) {
 		t.Fatalf("click the row: %v", err)
 	}
 	// The year-by-year figures, which the table alone does not show.
-	if !tt.HasText("ROE 24.0%") {
+	if !tt.HasText("24.0%") {
 		t.Errorf("want the yearly detail, texts %q", tt.Texts())
 	}
 	if !tt.HasText("2023") {
@@ -348,5 +349,187 @@ func TestIdleWindowExplainsItself(t *testing.T) {
 	tt := ui.NewTester(a.View, 1280, 800)
 	if !tt.HasText("No screen run yet") {
 		t.Errorf("want an empty state, texts %q", tt.Texts())
+	}
+}
+
+// withMissing is a finished run where the channel refused one stock.
+func withMissing() engine.Result {
+	r := sample()
+	r.Missing = []engine.Verdict{{
+		Stock:       engine.Stock{Code: "US.TCEHY", Name: "Tencent (ADR)", PE: 15.2},
+		Unavailable: "暂不提供美股 OTC 市场行情",
+	}}
+	return r
+}
+
+func TestMissingStocksAreAGroupOfTheirOwn(t *testing.T) {
+	a := newTestApp()
+	a.Screen = func(context.Context, config.Criteria, func(int, int, string)) (engine.Result, error) {
+		return withMissing(), nil
+	}
+	tt := ui.NewTester(a.View, 1280, 800)
+	runAndWait(t, tt)
+
+	if !tt.HasText("No data (1)") {
+		t.Fatalf("want a No data tab, texts %q", tt.Texts())
+	}
+	if err := tt.Click("No data (1)"); err != nil {
+		t.Fatalf("click the tab: %v", err)
+	}
+	if !tt.HasText("US.TCEHY") {
+		t.Errorf("want the stock, texts %q", tt.Texts())
+	}
+	if !tt.HasText("暂不提供美股 OTC 市场行情") {
+		t.Errorf("want the channel's reason, texts %q", tt.Texts())
+	}
+	// Nothing was measured, so it is not among the rejected.
+	if err := tt.Click("Rejected (1)"); err != nil {
+		t.Fatal(err)
+	}
+	if tt.HasText("US.TCEHY") {
+		t.Errorf("a missing stock should not sit under Rejected, texts %q", tt.Texts())
+	}
+}
+
+func TestRetryAsksAgainAndMovesTheStock(t *testing.T) {
+	a := newTestApp()
+	a.Screen = func(context.Context, config.Criteria, func(int, int, string)) (engine.Result, error) {
+		return withMissing(), nil
+	}
+	asked := make(chan string, 1)
+	a.Retry = func(_ context.Context, _ config.Criteria, s engine.Stock) (engine.Verdict, error) {
+		asked <- s.Code
+		return engine.Verdict{
+			Stock:     s,
+			ROE:       engine.ROEReport{ROE: map[int]float64{2024: 0.31}},
+			Passed:    true,
+			Valuation: &engine.Valuation{Percentile: 4},
+		}, nil
+	}
+	tt := ui.NewTester(a.View, 1280, 800)
+	runAndWait(t, tt)
+	if err := tt.Click("No data (1)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tt.Click("Retry US.TCEHY"); err != nil {
+		t.Fatalf("click Retry: %v", err)
+	}
+
+	select {
+	case code := <-asked:
+		if code != "US.TCEHY" {
+			t.Errorf("asked for %q", code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the retry never ran")
+	}
+	for i := 0; i < 100 && a.Retrying() != ""; i++ {
+		tt.Advance(10 * time.Millisecond)
+		tt.Frame()
+	}
+
+	r := a.Result()
+	if len(r.Missing) != 0 {
+		t.Errorf("the stock should have left the missing group: %+v", r.Missing)
+	}
+	if len(r.Passed) != 2 {
+		t.Errorf("it should have joined the passed group: %+v", r.Passed)
+	}
+	if tt.HasText("No data (1)") {
+		t.Errorf("the tab should be gone, texts %q", tt.Texts())
+	}
+}
+
+func TestARetryThatFailsAgainKeepsTheStockAndSaysWhy(t *testing.T) {
+	a := newTestApp()
+	a.Screen = func(context.Context, config.Criteria, func(int, int, string)) (engine.Result, error) {
+		return withMissing(), nil
+	}
+	a.Retry = func(context.Context, config.Criteria, engine.Stock) (engine.Verdict, error) {
+		return engine.Verdict{}, errors.New("OpenD is not running on 127.0.0.1:11111")
+	}
+	tt := ui.NewTester(a.View, 1280, 800)
+	runAndWait(t, tt)
+	a.RetryStock("US.TCEHY")
+	for i := 0; i < 100 && a.Retrying() != ""; i++ {
+		tt.Advance(10 * time.Millisecond)
+		tt.Frame()
+	}
+	r := a.Result()
+	if len(r.Missing) != 1 {
+		t.Fatalf("the stock should still be missing: %+v", r)
+	}
+	if !strings.Contains(r.Missing[0].Unavailable, "OpenD is not running") {
+		t.Errorf("the reason should be this attempt's: %q", r.Missing[0].Unavailable)
+	}
+}
+
+func TestRetryOnlyAppliesToMissingStocks(t *testing.T) {
+	a := newTestApp()
+	a.Screen = func(context.Context, config.Criteria, func(int, int, string)) (engine.Result, error) {
+		return withMissing(), nil
+	}
+	a.Retry = func(context.Context, config.Criteria, engine.Stock) (engine.Verdict, error) {
+		t.Error("a stock with figures was asked for again")
+		return engine.Verdict{}, nil
+	}
+	runAndWait(t, ui.NewTester(a.View, 1280, 800))
+	if a.RetryStock("HK.00700") {
+		t.Error("a passed stock should not be retried")
+	}
+}
+
+func TestTheDialogClosesAndCanBeOpenedForTheSameStockAgain(t *testing.T) {
+	a := newTestApp()
+	tt := ui.NewTester(a.View, 1280, 800)
+	runAndWait(t, tt)
+	if err := tt.Click("Tencent"); err != nil {
+		t.Fatal(err)
+	}
+	if !tt.HasText("NET CASH") {
+		t.Fatalf("want the dialog, texts %q", tt.Texts())
+	}
+	if err := tt.Click("Close"); err != nil {
+		t.Fatalf("click Close: %v", err)
+	}
+	if tt.HasText("NET CASH") {
+		t.Errorf("the dialog should be gone, texts %q", tt.Texts())
+	}
+	if err := tt.Click("Tencent"); err != nil {
+		t.Fatalf("pick the same stock again: %v", err)
+	}
+	if !tt.HasText("NET CASH") {
+		t.Errorf("the dialog should open again, texts %q", tt.Texts())
+	}
+}
+
+func TestTheTitleBarOffersTheWindowControls(t *testing.T) {
+	a := newTestApp()
+	tt := ui.NewTester(a.View, 1280, 800)
+	for _, want := range []string{"Minimize window", "Maximize window", "Close window"} {
+		if !tt.HasText(want) {
+			t.Errorf("want the %s control, texts %q", want, tt.Texts())
+		}
+	}
+}
+
+func TestAMissingStocksDialogSaysWhy(t *testing.T) {
+	a := newTestApp()
+	a.Screen = func(context.Context, config.Criteria, func(int, int, string)) (engine.Result, error) {
+		return withMissing(), nil
+	}
+	tt := ui.NewTester(a.View, 1280, 800)
+	runAndWait(t, tt)
+	if err := tt.Click("No data (1)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tt.Click("Tencent (ADR)"); err != nil {
+		t.Fatalf("pick the row: %v", err)
+	}
+	if !tt.HasText("The channel returned no figures") {
+		t.Errorf("want the dialog, texts %q", tt.Texts())
+	}
+	if !tt.HasText("Ask again") {
+		t.Errorf("want the retry in the dialog, texts %q", tt.Texts())
 	}
 }

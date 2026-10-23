@@ -1,0 +1,8 @@
+{
+  "name": "Value screen",
+  "identifier": "com.luckycurve.value-screener",
+  "version": "1.0.0",
+  "icon": "app/icon.png",
+  "main": ".",
+  "out": "dist"
+}

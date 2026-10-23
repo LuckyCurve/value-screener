@@ -2,8 +2,9 @@
 
 A value-investing screen over Hong Kong, US and A-share listings, with a
 native window: set the rules on the left, click **Run screen**, and the
-stocks that clear every rule show up in a table. Click a row to see that
-stock's figures year by year.
+stocks that clear every rule show up in a table. Click a row to open that
+stock's figures year by year. Stocks the channel could not answer for are a
+group of their own, each with a retry.
 
 The figures come from Futu's OpenD, which must be running and logged in on
 `127.0.0.1:11111`. Nothing is traded: the app only opens a quote context.
@@ -46,19 +47,44 @@ go run .
 The window opens on `criteria.json` if there is one beside `datalayer/`, and
 on the shipped defaults otherwise.
 
-## Portable build
+## Build
 
 ```sh
-powershell -ExecutionPolicy Bypass -File scripts/build-windows.ps1
+powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1
 ```
 
-This makes `dist/value-screener/`, which runs on a machine with no Python and
-no Go: the window, plus `value-screener-dl.exe`, the data layer frozen into a
-single binary. Copy the folder anywhere, keep the two files together, and run
-`value-screener.exe`. All it needs is OpenD running and logged in.
+This writes two files to `dist\`:
 
-Run files (`criteria.run.json`, `dataset.json`) go to `data/` in that folder;
-`criteria.json` beside the app holds the rules it opens on.
+- `value-screener.exe` — one file, nothing to install. The data layer is
+  packed inside it and unpacks itself into the user's cache the first time a
+  run starts.
+- `Value screen Setup 1.0.0 amd64.exe` — the same app as a per-user install,
+  with a Start menu shortcut, an optional desktop shortcut, and an
+  uninstaller under Settings > Apps.
+
+Both need only OpenD running and logged in: no Python, no Go. Settings and
+the cache live beside the executable, or in `%LOCALAPPDATA%\Programs` after
+an install.
+
+## Tests
+
+CI runs these on every push and pull request
+(`.github/workflows/test.yml`): Go on Linux and Windows with the race
+detector, and the Python data layer on its own.
+
+```sh
+go test ./...              # Go: rules, cache policy, process wiring, the window
+.venv/Scripts/python -m pytest datalayer   # the data layer
+go test -tags live ./app -run Live -v      # against a running OpenD
+```
+
+The window is tested without a window: `ui.NewTester` builds each frame,
+clicks by label, and reads back the text, so the tests exercise the same view
+code the app runs. To look at that rendering yourself:
+
+```sh
+VALUE_SCREENER_SHOTS=out go test ./app -run TestShots
+```
 
 ## Tests
 
@@ -95,18 +121,33 @@ field the window edits lives here:
 
 ## Layout
 
+See [AGENTS.md](AGENTS.md) for the design and the rules that keep the layers
+apart. In short:
+
 ```
-app/        the window: form, run, tables, year-by-year detail
-engine/     the rules; the only place a pass or fail is decided
-dataset/    reads the JSON the data layer writes
+app/        the window: form, run, three groups of results, the dialog
+screener/   cache policy and judging: who to ask for what, what to keep
+source/     the channel: today Futu, behind two methods
+cache/      SQLite: closed fiscal years and recorded refusals
 runner/     runs the data layer as a child process, reads its progress
+engine/     the rules; the only place a pass or fail is decided
 config/     the criteria and their validation
-datalayer/  Python: Futu OpenD → raw figures, no judgement
+datalayer/  Python: Futu OpenD -> raw figures, no judgement
 ```
 
-The split is deliberate. Python fetches; Go decides. The same numbers always
-produce the same verdict, and the rules can be tested without a market being
-open.
+The split is deliberate. Python fetches; Go decides, and remembers only what
+cannot change. Swapping Futu for another channel is one file in `source/`.
+
+## The cache
+
+`value-screener-cache.db` beside the app holds the annual ROE and the cash
+and debt of every closed balance sheet. A stock whose years are all there is
+judged without asking Futu at all.
+
+Anything that moves with the share price — PE, market capitalisation, the PE
+percentile — is never cached and is fetched every run. A refusal from the
+channel is remembered too, so the "No data" group says how recently it
+happened; the retry button clears it and asks again.
 
 ## Reading the numbers
 

@@ -53,6 +53,12 @@ type Verdict struct {
 	Balance   BalanceReport
 	Valuation *Valuation
 
+	// Unavailable, when set, is why the figures could not be fetched at all:
+	// Futu refused the code, the market is not covered, the line names did
+	// not match. Such a stock is rejected, and says so, rather than
+	// reporting an empty history as a failed one.
+	Unavailable string
+
 	Passed bool
 	// Failures names each criterion the stock missed, with the years that
 	// caused it. Empty when Passed.
