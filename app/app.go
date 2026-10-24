@@ -299,10 +299,14 @@ func (a *App) streamed(v engine.Verdict) {
 		a.mu.Unlock()
 		return
 	}
-	if a.live == nil {
-		a.live = &engine.Result{Criteria: a.Criteria()}
+	// A copy, not an edit: the window draws the last snapshot without
+	// holding the lock, and appending to it underneath is a data race.
+	next := engine.Result{Criteria: a.Criteria()}
+	if a.live != nil {
+		next = *a.live
 	}
-	a.live.Add(v)
+	next.Add(v)
+	a.live = &next
 	a.mu.Unlock()
 	a.invalidate()
 }
@@ -415,16 +419,22 @@ func (a *App) RetryStock(code string) bool {
 		// Only into the result it was asked about. A run started while the
 		// retry was in flight has a result of its own, and this answer says
 		// nothing about it.
+		//
+		// The answer goes into a copy that replaces the result, never into
+		// the result itself: the window reads that result without holding
+		// the lock, and editing it under a reader is a data race.
 		if target != nil && a.result == target && a.status == statusFinished {
+			next := *target
 			switch {
 			case err == nil:
-				target.Replace(v)
+				next.Replace(v)
 			case !errors.Is(err, context.Canceled):
 				// The channel could not be reached at all: the stock keeps
 				// its place, and its row says what went wrong this time.
-				target.Replace(engine.Verdict{Stock: stock,
+				next.Replace(engine.Verdict{Stock: stock,
 					Unavailable: err.Error()})
 			}
+			a.result = &next
 		}
 		a.mu.Unlock()
 		a.invalidate()

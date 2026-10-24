@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -603,6 +604,61 @@ func TestRetryAsksAgainAndMovesTheStock(t *testing.T) {
 	}
 	if tt.HasText("No data (1)") {
 		t.Errorf("the tab should be gone, texts %q", tt.Texts())
+	}
+}
+
+// The window keeps drawing while a retry is in flight. A retry must not edit
+// the result the window is reading: it replaces it with a new one.
+//
+// Run under -race, as CI does: a retry that edits the published result in
+// place is a data race, even when every assertion here passes.
+func TestARetryDoesNotEditTheResultTheWindowIsReading(t *testing.T) {
+	a := newTestApp()
+	a.Screen = func(context.Context, config.Criteria, func(int, int, string)) (engine.Result, error) {
+		return withMissing(), nil
+	}
+	a.Retry = func(_ context.Context, _ config.Criteria, s engine.Stock) (engine.Verdict, error) {
+		return engine.Verdict{Stock: s, Passed: true}, nil
+	}
+	a.Start()
+	a.Wait()
+
+	before := a.Result()
+	stop := make(chan struct{})
+	var reading sync.WaitGroup
+	reading.Add(1)
+	go func() {
+		defer reading.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				// What the table does each frame: walk the published result
+				// without holding the lock.
+				if r := a.Result(); r != nil {
+					for _, vs := range [][]engine.Verdict{r.Passed, r.Rejected, r.Missing} {
+						for _, v := range vs {
+							_ = v.Stock.Code
+						}
+					}
+				}
+			}
+		}
+	}()
+
+	a.RetryStock("US.TCEHY")
+	for i := 0; i < 500 && a.Retrying() != ""; i++ {
+		time.Sleep(time.Millisecond)
+	}
+	close(stop)
+	reading.Wait()
+
+	if after := a.Result(); after == before {
+		t.Errorf("the retry should have replaced the result, not edited it")
+	}
+	if len(a.Result().Missing) != 0 {
+		t.Errorf("the stock should have left the missing group")
 	}
 }
 
