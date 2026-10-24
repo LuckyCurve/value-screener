@@ -40,3 +40,24 @@ def test_unicode_names_survive():
     s = io.StringIO()
     Progress(s).stock(1, 1, "SH.600519", "贵州茅台")
     assert "贵州茅台" in s.getvalue()
+
+
+def test_bytes_are_utf8_even_when_the_stream_has_another_code_page():
+    """Windows gives a piped stderr the console's code page. Writing the line
+    as text put GBK bytes on the wire and the app, which reads UTF-8, showed
+    a stock's Chinese name as mojibake."""
+
+    class PipedStderr(io.TextIOWrapper):
+        """What sys.stderr is on Windows: a text stream over bytes."""
+
+        def __init__(self):
+            self.buf = io.BytesIO()
+            super().__init__(self.buf, encoding="gbk")
+
+    s = PipedStderr()
+    Progress(s).stock(1, 1, "SH.600519", "贵州茅台")
+    raw = s.buf.getvalue()
+
+    # The bytes are UTF-8, not the stream's own code page.
+    assert "贵州茅台".encode("utf-8") in raw
+    assert json.loads(raw.decode("utf-8"))["name"] == "贵州茅台"

@@ -15,8 +15,26 @@ class Progress:
         self._stream = stream if stream is not None else sys.stderr
 
     def _emit(self, **payload) -> None:
-        self._stream.write(json.dumps(payload, ensure_ascii=False) + "\n")
-        self._stream.flush()
+        self._write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+    def _write(self, line: str) -> None:
+        """Write the line as UTF-8 bytes, whatever the stream's encoding is.
+
+        Windows gives a piped stderr the console's code page, so writing a
+        stock's Chinese name as text put GBK bytes on the wire and the app,
+        which reads UTF-8, showed them as mojibake. Text has to go to the
+        underlying byte buffer: handing bytes to a text stream re-encodes
+        them with the stream's own code page, which is the bug itself.
+        """
+        stream = self._stream
+        buf = getattr(stream, "buffer", None)
+        if buf is not None:
+            buf.write(line.encode("utf-8"))
+            buf.flush()
+            return
+        # A test's StringIO, or any stream that takes text.
+        stream.write(line)
+        stream.flush()
 
     def phase(self, name: str) -> None:
         self._emit(event="phase", name=name)
