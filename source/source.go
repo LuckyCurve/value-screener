@@ -9,9 +9,15 @@ package source
 
 import (
 	"context"
+	"errors"
 
 	"github.com/LuckyCurve/value-screener/engine"
 )
+
+// ErrUnavailable is returned when the channel never reached its data source:
+// nothing was asked, so the reason is the setup, not the rules. A channel
+// maps its own transport's version of this onto it.
+var ErrUnavailable = errors.New("the data source is not reachable")
 
 // Candidate is one stock the first pass turned up, with its live figures.
 type Candidate struct {
@@ -24,13 +30,29 @@ type Candidate struct {
 
 // Annual is one stock's reports: the years that never change again, and
 // today's valuation, which does.
+//
+// It is also the payload of a streamed answer, so its year keys are numbers,
+// which is what the data layer writes its years as.
 type Annual struct {
-	Code      string            `json:"code"`
-	Name      string            `json:"name"`
-	ROE       map[int]float64   `json:"roe,omitempty"`
-	Balance   map[int]Balance   `json:"balance,omitempty"`
-	Valuation *engine.Valuation `json:"valuation,omitempty"`
-	Error     string            `json:"error,omitempty"`
+	Code      string               `json:"code"`
+	Name      string               `json:"name"`
+	ROE       map[int]float64      `json:"roe,omitempty"`
+	Balance   map[int]Balance      `json:"balance,omitempty"`
+	Valuation *engine.Valuation    `json:"valuation,omitempty"`
+	Error     string               `json:"error,omitempty"`
+}
+
+// Stream is a channel that reports each stock as it arrives, rather than
+// only when the whole fetch is done. Both its methods return everything they
+// produced, so a channel that cannot stream answers in one call at the end.
+type Stream interface {
+	Source
+	// Candidates reports the first pass as soon as it is known.
+	CandidatesStream(ctx context.Context, q Query, on func([]Candidate),
+		progress Progress) ([]Candidate, error)
+	// Figures reports each stock's report as it is fetched.
+	FiguresStream(ctx context.Context, q Query, codes []string,
+		on func(Annual), progress Progress) ([]Annual, error)
 }
 
 // Balance is one year's cash and interest-bearing debt.

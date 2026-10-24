@@ -62,6 +62,29 @@ func TestShots(t *testing.T) {
 			}
 			return a
 		}, func(tt *ui.Tester) { _ = tt.Click("Cancel") }},
+		{"tips", func() *App {
+			a := newTestApp()
+			a.Screen = func(context.Context, config.Criteria, func(int, int, string)) (engine.Result, error) {
+				return engine.Result{}, errOpenD
+			}
+			return a
+		}, nil},
+		{"streaming", func() *App {
+			a := newTestApp()
+			a.Screen = func(ctx context.Context, _ config.Criteria, progress func(int, int, string)) (engine.Result, error) {
+				r := sample()
+				for _, v := range r.Passed {
+					a.streamed(v)
+				}
+				for _, v := range r.Rejected {
+					a.streamed(v)
+				}
+				progress(2, 40, "HK.00005")
+				<-ctx.Done()
+				return engine.Result{}, ctx.Err()
+			}
+			return a
+		}, func(tt *ui.Tester) { tt.Frame() }},
 	}
 
 	if err := os.MkdirAll(dir, 0o755); err != nil {

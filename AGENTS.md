@@ -42,7 +42,19 @@ type Source interface {
 	Candidates(ctx, Query, Progress) ([]Candidate, error) // codes, names, live PE
 	Figures(ctx, Query, codes, Progress) ([]Annual, error) // yearly reports, refusal
 }
+
+// Stream is optional: a channel that can report each stock as it arrives.
+// A channel that cannot still works, answering in one call at the end.
+type Stream interface {
+	Source
+	CandidatesStream(ctx, Query, on func([]Candidate), Progress) ([]Candidate, error)
+	FiguresStream(ctx, Query, codes, on func(Annual), Progress) ([]Annual, error)
+}
 ```
+
+The window fills its table from the stream, not from the final result: a
+stock judged is a stock shown, while the rest are still being fetched. The
+finished result replaces the table at the end and is the authority.
 
 `source.Futu` is today's only implementation; it happens to shell out to a
 Python data layer. A new channel — an HTTP provider, a CSV replay, another
@@ -82,6 +94,17 @@ Balance figures are magnitudes, in `futuclient.balance_series`. A statement's
 own sign is Futu's convention — Hong Kong reports a borrowing positive, the US
 labels it with a minus — and a rule that depends on it would pass one exchange
 and fail another.
+
+## When OpenD is not there
+
+The data layer checks the port before it lets the SDK connect: the SDK
+retries a refused connection for about half a minute, and a run should say
+what is wrong at once. It exits with `runner.Unreachable` (3), the channel
+maps that to `source.ErrUnavailable`, and the window answers with its Tips
+page instead of a line of log.
+
+That page is the one place the app tells the user how to set it up. Keep it
+short: the steps to get OpenD running, and a way to try again.
 
 ## Stopping
 

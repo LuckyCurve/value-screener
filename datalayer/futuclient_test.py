@@ -1,9 +1,36 @@
 """Tests for the OpenD client's pure parts: rate limiting, code prefixes,
 period parsing, and the balance-sheet arithmetic."""
 
+import sys
+
 import pytest
 
 from datalayer import futuclient
+
+
+# -- reaching OpenD --------------------------------------------------------
+
+
+def test_connect_says_open_d_is_not_running_without_calling_the_sdk(monkeypatch):
+    """The SDK retries a refused port for half a minute. A run should say
+    what is wrong at once, in words the window can show."""
+    called = []
+    monkeypatch.setattr(futuclient, "reachable", lambda *a, **k: False)
+    monkeypatch.setitem(
+        sys.modules, "futu",
+        type("M", (), {"OpenQuoteContext": lambda **k: called.append(k)}))
+
+    client = futuclient.QuoteClient()
+    with pytest.raises(futuclient.OpenDError) as err:
+        client.connect()
+
+    assert "OpenD is not running" in str(err.value)
+    assert "127.0.0.1:11111" in str(err.value)
+    assert called == []
+
+
+def test_reachable_is_false_for_a_closed_port():
+    assert futuclient.reachable("127.0.0.1", 1, timeout=0.2) is False
 
 
 class FakeClock:

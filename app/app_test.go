@@ -178,6 +178,37 @@ func TestRunReportsProgressWhileScreening(t *testing.T) {
 	close(release)
 }
 
+// The table fills while the run is still going: judging the first stock must
+// show it before the run ends.
+func TestStocksShowWhileTheRunIsStillGoing(t *testing.T) {
+	a := newTestApp()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	a.Screen = func(_ context.Context, _ config.Criteria, progress func(int, int, string)) (engine.Result, error) {
+		for _, v := range sample().Passed {
+			a.streamed(v)
+		}
+		progress(1, 2, "HK.00700")
+		close(started)
+		<-release
+		return sample(), nil
+	}
+	tt := ui.NewTester(a.View, 1200, 760)
+	if err := tt.Click("Run screen"); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	tt.Frame()
+	if !tt.HasText("Tencent") {
+		t.Errorf("the judged stock should show while the run is going, texts %q", tt.Texts())
+	}
+	if !tt.HasText("Passed") {
+		t.Errorf("the row should say its verdict, texts %q", tt.Texts())
+	}
+	close(release)
+	a.Wait()
+}
+
 func TestCancelStopsRun(t *testing.T) {
 	a := newTestApp()
 	cancelled := make(chan struct{})
@@ -341,6 +372,60 @@ func TestScreenErrorIsShown(t *testing.T) {
 	runAndWait(t, tt)
 	if !tt.HasText("OpenD is not running") {
 		t.Errorf("want the error on screen, texts %q", tt.Texts())
+	}
+}
+
+// The common failure is a channel that is not running. It gets a page of its
+// own, saying what to do, rather than a line of the log.
+func TestNoOpenDShowsTheTipsPage(t *testing.T) {
+	a := newTestApp()
+	a.Screen = func(context.Context, config.Criteria, func(int, int, string)) (engine.Result, error) {
+		return engine.Result{}, errOpenD
+	}
+	tt := ui.NewTester(a.View, 1280, 800)
+	runAndWait(t, tt)
+
+	for _, want := range []string{"OpenD is not running", "Start OpenD", "Try again"} {
+		if !tt.HasText(want) {
+			t.Errorf("want %q on the tips page, texts %q", want, tt.Texts())
+		}
+	}
+	if tt.HasText("Could not run") {
+		t.Errorf("the tips page should replace the failure card, texts %q", tt.Texts())
+	}
+}
+
+func TestTheTipsPageHidesUntilTheNextRun(t *testing.T) {
+	a := newTestApp()
+	a.Screen = func(context.Context, config.Criteria, func(int, int, string)) (engine.Result, error) {
+		return engine.Result{}, errOpenD
+	}
+	a.Start()
+	a.Wait()
+	tt := ui.NewTester(a.View, 1280, 800)
+	if err := tt.Click("Hide tips"); err != nil {
+		t.Fatalf("click Hide tips: %v", err)
+	}
+	tt.Frame()
+	if tt.HasText("Start OpenD") {
+		t.Errorf("the tips should be hidden, texts %q", tt.Texts())
+	}
+}
+
+// A run that stopped for another reason gets the page too, but without the
+// OpenD steps: they would not be true.
+func TestAFailedRunOffersThePageWithoutTheOpenDSteps(t *testing.T) {
+	a := newTestApp()
+	a.Screen = func(context.Context, config.Criteria, func(int, int, string)) (engine.Result, error) {
+		return engine.Result{}, errRunFailed
+	}
+	tt := ui.NewTester(a.View, 1280, 800)
+	runAndWait(t, tt)
+	if !tt.HasText("The screen stopped") {
+		t.Errorf("want the failure page, texts %q", tt.Texts())
+	}
+	if tt.HasText("Start OpenD") {
+		t.Errorf("the OpenD steps do not apply, texts %q", tt.Texts())
 	}
 }
 

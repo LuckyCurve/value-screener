@@ -62,11 +62,71 @@ func tencent() (source.Candidate, source.Annual) {
 	return c, a
 }
 
+// streaming is a channel that reports each stock as it arrives, as the Futu
+// one does.
+type streaming struct {
+	fake
+}
+
+func (f *streaming) CandidatesStream(_ context.Context, _ source.Query,
+	on func([]source.Candidate), _ source.Progress) ([]source.Candidate, error) {
+	if on != nil {
+		on(f.candidates)
+	}
+	return f.candidates, nil
+}
+
+func (f *streaming) FiguresStream(_ context.Context, _ source.Query,
+	codes []string, on func(source.Annual), _ source.Progress) ([]source.Annual, error) {
+	f.asked = append(f.asked, codes...)
+	out := make([]source.Annual, 0, len(codes))
+	for _, c := range codes {
+		if a, ok := f.figures[c]; ok {
+			out = append(out, a)
+			if on != nil {
+				on(a)
+			}
+		}
+	}
+	return out, nil
+}
+
+// The window shows each verdict as the channel answers for that stock, so a
+// screen reads as it goes rather than all at once at the end.
+func TestRunReportsEachVerdictAsItIsReached(t *testing.T) {
+	c, a := tencent()
+	other := source.Candidate{Code: "HK.00005", Name: "HSBC", PE: 9}
+	hsbc := a
+	hsbc.Code, hsbc.Name = other.Code, other.Name
+	f := &streaming{fake{candidates: []source.Candidate{c, other},
+		figures: map[string]source.Annual{c.Code: a, other.Code: hsbc}}}
+
+	var got []string
+	var firstPass int
+	res, err := Screen{Criteria: criteria(), Source: f}.Run(context.Background(),
+		Watch{
+			FirstPass: func(cs []source.Candidate) { firstPass = len(cs) },
+			Judged:    func(v engine.Verdict) { got = append(got, v.Stock.Code) },
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstPass != 2 {
+		t.Errorf("the candidate list should arrive before the fetch, got %d", firstPass)
+	}
+	if len(got) != 2 {
+		t.Fatalf("each stock should be reported as judged, got %v", got)
+	}
+	if len(res.Passed)+len(res.Rejected)+len(res.Missing) != 2 {
+		t.Errorf("the result should still hold every stock: %+v", res)
+	}
+}
+
 func TestRunJudgesWhatTheChannelReturns(t *testing.T) {
 	c, a := tencent()
 	f := &fake{candidates: []source.Candidate{c},
 		figures: map[string]source.Annual{c.Code: a}}
-	res, err := Screen{Criteria: criteria(), Source: f}.Run(context.Background(), nil)
+	res, err := Screen{Criteria: criteria(), Source: f}.Run(context.Background(), Watch{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +146,7 @@ func TestClosedYearsAreCachedAndReused(t *testing.T) {
 		figures: map[string]source.Annual{c.Code: a}}
 
 	s := Screen{Criteria: criteria(), Source: f, Cache: store}
-	if _, err := s.Run(context.Background(), nil); err != nil {
+	if _, err := s.Run(context.Background(), Watch{}); err != nil {
 		t.Fatal(err)
 	}
 	cached, _ := store.ROE(c.Code)
@@ -96,7 +156,7 @@ func TestClosedYearsAreCachedAndReused(t *testing.T) {
 
 	// A second run must not ask the channel again.
 	f.asked = nil
-	res, err := s.Run(context.Background(), nil)
+	res, err := s.Run(context.Background(), Watch{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +177,7 @@ func TestShortCacheIsRefetched(t *testing.T) {
 	f := &fake{candidates: []source.Candidate{c},
 		figures: map[string]source.Annual{c.Code: a}}
 	s := Screen{Criteria: criteria(), Source: f, Cache: store}
-	if _, err := s.Run(context.Background(), nil); err != nil {
+	if _, err := s.Run(context.Background(), Watch{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.asked) != 1 {
@@ -140,13 +200,13 @@ func TestAValuationAlwaysGoesToTheChannel(t *testing.T) {
 	cfg := criteria()
 	cfg.PercentileYears = 10
 	s := Screen{Criteria: cfg, Source: f, Cache: store}
-	if _, err := s.Run(context.Background(), nil); err != nil {
+	if _, err := s.Run(context.Background(), Watch{}); err != nil {
 		t.Fatal(err)
 	}
 	// Fill the cache, then run again: the percentile is live, so the
 	// channel is still asked.
 	f.asked = nil
-	if _, err := s.Run(context.Background(), nil); err != nil {
+	if _, err := s.Run(context.Background(), Watch{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.asked) != 1 {
@@ -165,7 +225,7 @@ func TestTheValuationIsNeverCached(t *testing.T) {
 	cfg := criteria()
 	cfg.PercentileYears = 10
 	if _, err := (Screen{Criteria: cfg, Source: f, Cache: store}).
-		Run(context.Background(), nil); err != nil {
+		Run(context.Background(), Watch{}); err != nil {
 		t.Fatal(err)
 	}
 	// The cache has years, and nothing that came from the share price.
@@ -187,7 +247,7 @@ func TestRefusalIsReportedNotDropped(t *testing.T) {
 		figures: map[string]source.Annual{
 			c.Code: {Code: c.Code, Error: "暂不提供美股 OTC 市场行情"},
 		}}
-	res, err := Screen{Criteria: criteria(), Source: f}.Run(context.Background(), nil)
+	res, err := Screen{Criteria: criteria(), Source: f}.Run(context.Background(), Watch{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +268,7 @@ func TestRefusalIsRememberedAndCanBeForgotten(t *testing.T) {
 			c.Code: {Code: c.Code, Error: "not covered"},
 		}}
 	s := Screen{Criteria: criteria(), Source: f, Cache: store}
-	if _, err := s.Run(context.Background(), nil); err != nil {
+	if _, err := s.Run(context.Background(), Watch{}); err != nil {
 		t.Fatal(err)
 	}
 	reason, at, _ := store.Failure(c.Code)
@@ -218,7 +278,7 @@ func TestRefusalIsRememberedAndCanBeForgotten(t *testing.T) {
 
 	// A retry clears it and fetches again.
 	f.figures[c.Code] = a
-	if _, err := s.Run(context.Background(), nil); err != nil {
+	if _, err := s.Run(context.Background(), Watch{}); err != nil {
 		t.Fatal(err)
 	}
 	if reason, _, _ := store.Failure(c.Code); reason != "" {
@@ -229,7 +289,7 @@ func TestRefusalIsRememberedAndCanBeForgotten(t *testing.T) {
 func TestSilentChannelIsReported(t *testing.T) {
 	c, _ := tencent()
 	f := &fake{candidates: []source.Candidate{c}, figures: map[string]source.Annual{}}
-	res, err := Screen{Criteria: criteria(), Source: f}.Run(context.Background(), nil)
+	res, err := Screen{Criteria: criteria(), Source: f}.Run(context.Background(), Watch{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +306,7 @@ func TestAStoppedRunKeepsTheVerdictsItReached(t *testing.T) {
 	f := &partial{candidates: []source.Candidate{first, second},
 		figures: []source.Annual{a}, err: context.Canceled}
 
-	res, err := Screen{Criteria: criteria(), Source: f}.Run(context.Background(), nil)
+	res, err := Screen{Criteria: criteria(), Source: f}.Run(context.Background(), Watch{})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("the stop should be reported, got %v", err)
 	}
@@ -275,7 +335,7 @@ func (p *partial) Figures(context.Context, source.Query, []string, source.Progre
 
 func TestChannelErrorStopsTheRun(t *testing.T) {
 	f := &fake{screenErr: errors.New("OpenD is not running")}
-	_, err := Screen{Criteria: criteria(), Source: f}.Run(context.Background(), nil)
+	_, err := Screen{Criteria: criteria(), Source: f}.Run(context.Background(), Watch{})
 	if err == nil {
 		t.Fatal("a channel that cannot be reached should fail the run")
 	}
@@ -285,7 +345,7 @@ func TestNoCacheStillWorks(t *testing.T) {
 	c, a := tencent()
 	f := &fake{candidates: []source.Candidate{c},
 		figures: map[string]source.Annual{c.Code: a}}
-	res, err := Screen{Criteria: criteria(), Source: f}.Run(context.Background(), nil)
+	res, err := Screen{Criteria: criteria(), Source: f}.Run(context.Background(), Watch{})
 	if err != nil || len(res.Passed) != 1 {
 		t.Fatalf("a screen without a cache must still judge: %v %+v", err, res)
 	}
@@ -293,7 +353,7 @@ func TestNoCacheStillWorks(t *testing.T) {
 
 func TestEmptyChannelIsAnEmptyResult(t *testing.T) {
 	res, err := Screen{Criteria: criteria(), Source: &fake{}}.
-		Run(context.Background(), nil)
+		Run(context.Background(), Watch{})
 	if err != nil || len(res.Passed)+len(res.Rejected)+len(res.Missing) != 0 {
 		t.Errorf("got %+v %v", res, err)
 	}

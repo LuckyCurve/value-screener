@@ -87,6 +87,11 @@ type App struct {
 	detailCode string
 	// retrying is the code being fetched again, "" for none.
 	retrying string
+	// tips is the setup page a failure opened, tipsNone for no page.
+	tips tips
+	// live is the run in flight, filling with each verdict as it is reached.
+	// The finished result replaces it when the run ends.
+	live *engine.Result
 
 	passed, rejected, missing ui.ListState
 
@@ -96,14 +101,16 @@ type App struct {
 
 // New returns an app on the shipped criteria, wired to the real data layer.
 func New() *App {
-	a := &App{Screen: DefaultScreen(), Retry: DefaultRetry()}
+	a := &App{Retry: DefaultRetry()}
+	a.Screen = DefaultScreen(a.streamed)
 	a.load(config.Default())
 	return a
 }
 
 // NewFrom returns an app on the given criteria, wired to the real data layer.
 func NewFrom(c config.Criteria) *App {
-	a := &App{Screen: DefaultScreen(), Retry: DefaultRetry()}
+	a := &App{Retry: DefaultRetry()}
+	a.Screen = DefaultScreen(a.streamed)
 	a.load(c)
 	return a
 }
@@ -270,13 +277,45 @@ func (a *App) Start() bool {
 	a.progress, a.total = 0, 0
 	a.elapsed = ""
 	a.result = nil
+	a.live = nil
 	a.stopped, a.cancelling = false, false
+	a.tips = tipsNone
 	a.mu.Unlock()
 	a.chosen = [3]int{-1, -1, -1}
 	a.detail, a.detailCode, a.tab = 0, "", 0
 
 	go a.run(ctx, cancel, c, done)
 	return true
+}
+
+// streamed takes one verdict as the run reaches it, and puts it in the table
+// under the progress bar. The run's own result arrives at the end and is the
+// authority; this is what makes the table fill while it is still fetching.
+func (a *App) streamed(v engine.Verdict) {
+	a.mu.Lock()
+	// Only into the run still in flight: a verdict from a run that has since
+	// been replaced must not land in the new one's table.
+	if !a.running {
+		a.mu.Unlock()
+		return
+	}
+	if a.live == nil {
+		a.live = &engine.Result{Criteria: a.Criteria()}
+	}
+	a.live.Add(v)
+	a.mu.Unlock()
+	a.invalidate()
+}
+
+// liveResult is the run in flight, for the window to draw under the progress
+// bar; nil before the first stock is reached.
+func (a *App) liveResult() *engine.Result {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.running {
+		return nil
+	}
+	return a.live
 }
 
 func (a *App) run(ctx context.Context, cancel context.CancelFunc, c config.Criteria, done chan struct{}) {
@@ -310,6 +349,7 @@ func (a *App) run(ctx context.Context, cancel context.CancelFunc, c config.Crite
 		a.status, a.stopped, a.message = statusFinished, true, ""
 	case err != nil:
 		a.status, a.message = statusFailed, err.Error()
+		a.tips = withTips(err)
 	default:
 		a.status = statusFinished
 		a.message = ""
@@ -609,7 +649,7 @@ func (a *App) results(c *ui.Context, t *ui.Theme) {
 	a.mu.Lock()
 	status, result, message := a.status, a.result, a.message
 	progress, total, elapsed := a.progress, a.total, a.elapsed
-	stopped := a.stopped
+	stopped, tips := a.stopped, a.tips
 	a.mu.Unlock()
 
 	switch status {
@@ -645,8 +685,17 @@ func (a *App) results(c *ui.Context, t *ui.Theme) {
 				ui.Text(c, label).FontSize(12).TextColor(t.TextMuted)
 			})
 		})
+		if live := a.liveResult(); live != nil && count(live) > 0 {
+			a.liveTable(c, t, live)
+		}
 
 	case statusFailed:
+		// A failure the window can explain is a page of its own, not a line
+		// of prose: a channel that is not running is the common one.
+		if tips != tipsNone {
+			a.tipsPage(c, t, tips)
+			return
+		}
 		card(c, t, 12, func() {
 			ui.Row(c).Gap(10).AlignItems(ui.Start).Children(func() {
 				ui.Icon(c, iconCross).FontSize(16).TextColor(t.Danger)
@@ -681,6 +730,52 @@ func (a *App) results(c *ui.Context, t *ui.Theme) {
 			ui.Text(c, message).FontSize(12).TextColor(t.Danger)
 		}
 	}
+}
+
+// liveTable is the screened-so-far table under the progress bar: the stocks
+// already judged, while the rest are still being fetched.
+func (a *App) liveTable(c *ui.Context, t *ui.Theme, r *engine.Result) {
+	cols := []ui.TableColumn{
+		{Title: "Code", Width: 100},
+		{Title: "Name", Width: 170},
+		{Title: "Verdict", Width: 130},
+		{Title: "Why"},
+	}
+	// The rows shift as the run goes, so none of them can be picked yet.
+	state := &ui.ListState{}
+	ui.Table(c, state, cols, count(r), func(row, col int) {
+		v := liveRow(r, row)
+		switch col {
+		case 0:
+			ui.Text(c, v.Stock.Code).SingleLine()
+		case 1:
+			ui.Text(c, v.Stock.Name).SingleLine()
+		case 2:
+			verdict := "Rejected"
+			colour := t.TextMuted
+			switch {
+			case v.Unavailable != "":
+				verdict, colour = "No data", t.Warning
+			case v.Passed:
+				verdict, colour = "Passed", t.Success
+			}
+			ui.Text(c, verdict).TextColor(colour)
+		case 3:
+			ui.Text(c, v.Summary()).SingleLine().TextColor(t.TextMuted)
+		}
+	}).Fill().Grow(1)
+}
+
+// liveRow walks a run in flight in a fixed order: passed, rejected, missing,
+// as the finished tables show them.
+func liveRow(r *engine.Result, row int) engine.Verdict {
+	for _, vs := range [][]engine.Verdict{r.Passed, r.Rejected, r.Missing} {
+		if row < len(vs) {
+			return vs[row]
+		}
+		row -= len(vs)
+	}
+	return engine.Verdict{}
 }
 
 // count is how many stocks a run judged, right or wrong.

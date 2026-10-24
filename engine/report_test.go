@@ -108,6 +108,28 @@ func TestSummaryNamesTheCriterion(t *testing.T) {
 	}
 }
 
+// The years read the way a person says them: no brackets, no slice syntax.
+func TestSummaryReadsTheYearsLikeASentence(t *testing.T) {
+	cases := []struct {
+		years []int
+		want  string
+	}{
+		{[]int{2021}, "net cash: debt above cash in 2021"},
+		{[]int{2023, 2022}, "net cash: debt above cash in 2023 and 2022"},
+		{[]int{2024, 2023, 2022}, "net cash: debt above cash in 2024, 2023 and 2022"},
+		// Past a few, the count says it and the list is noise.
+		{[]int{2024, 2023, 2022, 2021, 2020, 2019},
+			"net cash: debt above cash in 6 years, 2019 to 2024"},
+	}
+	for _, tc := range cases {
+		v := Verdict{Failures: []Failure{{Criterion: CritNetCash,
+			Reason: "debt above cash", Years: tc.years}}}
+		if got := v.Summary(); got != tc.want {
+			t.Errorf("summary %q, want %q", got, tc.want)
+		}
+	}
+}
+
 func TestAMissingStockIsItsOwnGroup(t *testing.T) {
 	v := Verdict{Stock: Stock{Code: "US.TCEHY"}, Unavailable: "OTC not covered"}
 	r := BuildResult(criteria(), []Verdict{

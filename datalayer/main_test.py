@@ -170,6 +170,35 @@ def test_one_bad_stock_does_not_cost_the_rest(tmp_path):
     assert "unexpected shape" in got["stocks"][1]["error"]
 
 
+def test_each_finished_stock_is_reported_before_the_run_ends(tmp_path):
+    """The window fills its table from these lines; a run that only spoke
+    at the end would leave it blank while it fetched."""
+    out = tmp_path / "figures.json"
+    stream = io.StringIO()
+
+    class Fast(futuclient.QuoteClient):
+        def roe_series(self, code):
+            return {2024: 0.31}
+
+        def balance_series(self, code):
+            return {2024: {"cash": 10.0, "debt": 1.0}}
+
+    args = type("A", (), {"code": ["HK.00700", "HK.00005"],
+                          "code_file": None, "out": str(out), "limit": 0})()
+    cli._figures(Fast(), criteria(percentile_years=0), args, Progress(stream))
+
+    lines = [json.loads(line) for line in stream.getvalue().splitlines()]
+    judged = [line for line in lines if line["event"] == "judged"]
+    assert [line["stock"]["code"] for line in judged] == ["HK.00700", "HK.00005"]
+    # The line holds the stock's own figures, not a reference to a packet.
+    assert judged[0]["stock"]["roe"] == {"2024": 0.31}
+    assert judged[0]["stock"]["balance"] == {
+        "2024": {"cash": 10.0, "debt": 1.0}}
+    # The last judged line comes after the packet already holds that stock.
+    assert [s["code"] for s in json.loads(out.read_text(encoding="utf-8"))["stocks"]] == [
+        "HK.00700", "HK.00005"]
+
+
 def test_a_half_written_packet_is_never_left_behind(tmp_path):
     """The reader is the app, after a kill: a truncated file would read as
     no run at all."""

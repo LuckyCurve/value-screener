@@ -29,7 +29,7 @@ import tempfile
 
 from .config_io import load_criteria
 from .futuclient import OpenDError, QuoteClient
-from .progress import Progress
+from .progress import Progress, fold
 
 # Futu's stock screen takes at most twelve consecutive years of a financial
 # property; asking for more returns nothing at all.
@@ -118,7 +118,9 @@ def main(argv: list[str] | None = None) -> int:
         client.connect()
     except OpenDError as exc:
         progress.error(str(exc))
-        return 2
+        # Exit 3 is the one case the window answers with its OpenD tips
+        # rather than a plain failure: the channel was never reached.
+        return 3 if "OpenD is not running" in str(exc) else 2
 
     try:
         if args.command == "candidates":
@@ -150,6 +152,9 @@ def _candidates(client: QuoteClient, criteria: dict, args, progress) -> list[dic
     if args.limit:
         out = out[: args.limit]
     progress.found(len(out))
+    # The window fills its table from this before the per-stock pass begins,
+    # so a screen shows its candidates while they are still being judged.
+    progress.candidate(out)
     return out
 
 
@@ -194,6 +199,9 @@ def _figures(client: QuoteClient, criteria: dict, args, progress) -> list[dict]:
         # Written as it goes: a cancelled run is killed outright on Windows,
         # so this file is all that survives it.
         save()
+        # After the save, so a window that judges this stock has also got its
+        # record on disk: a kill now loses nothing.
+        progress.judged(fold(entry))
     progress.done(len(out))
     return out
 

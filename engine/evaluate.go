@@ -50,11 +50,12 @@ func CheckROE(r ROEReport, c config.Criteria) ([]Failure, []string) {
 		}
 	}
 	if len(under) > c.ROESlack {
+		// The years go in Years, which the summary prints; repeating the
+		// count here would say "15 years ... in 15 years".
 		return []Failure{{
 			Criterion: CritROE,
-			Reason: fmt.Sprintf("%d years below %.0f%% (slack %d)",
-				len(under), c.ROEMin*100, c.ROESlack),
-			Years: under,
+			Reason:    fmt.Sprintf("under %.0f%%", c.ROEMin*100),
+			Years:     under,
 		}}, nil
 	}
 

@@ -220,6 +220,30 @@ func TestStaleDatasetIsNotReturned(t *testing.T) {
 	}
 }
 
+// A child that found nothing listening exits with Unreachable, and that is
+// not the same as a broken run: the window answers it with its OpenD tips.
+func TestAnUnreachableChannelIsItsOwnFailure(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "frozen")
+	body := "echo 'OpenD is not running on 127.0.0.1:11111' >&2\nexit 3\n"
+	if runtime.GOOS == "windows" {
+		script += ".bat"
+		body = "echo OpenD is not running on 127.0.0.1:11111 1>&2\r\n" +
+			"exit /b 3\r\n"
+	} else {
+		body = "#!/bin/sh\n" + body
+	}
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Run(context.Background(), dir, Options{DataLayer: script,
+		Args: []string{"candidates"}, OutPath: filepath.Join(dir, "out.json")})
+	if !errors.Is(err, ErrUnreachable) {
+		t.Fatalf("want ErrUnreachable, got %v", err)
+	}
+}
+
 func TestFailureReportsTheChildsOwnWords(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "frozen")

@@ -42,76 +42,127 @@ type Outstanding struct {
 	Reason string
 }
 
+// Watch is what a run reports as it goes. It may be nil, and each field may
+// be nil on its own.
+type Watch struct {
+	// Progress is the stock or phase in flight, for the window's line.
+	Progress source.Progress
+	// FirstPass is the candidate list, once the channel knows it.
+	FirstPass func([]source.Candidate)
+	// Judged is one stock's verdict, as soon as it is reached. A stock the
+	// cache answered arrives here before the first fetch.
+	Judged func(engine.Verdict)
+}
+
 // Run fetches, caches and judges. It reports progress as it goes so the
 // window can show which stock is in flight.
 //
 // A run the channel could not finish still returns the verdicts it reached,
 // with the error: a stop after forty stocks should show forty, not nothing.
-func (s Screen) Run(ctx context.Context, progress source.Progress) (engine.Result, error) {
-	all, err := s.Source.Candidates(ctx, s.Query(), progress)
+func (s Screen) Run(ctx context.Context, watch Watch) (engine.Result, error) {
+	progress := watch.Progress
+	all, err := s.candidates(ctx, watch)
 	if len(all) == 0 {
 		return engine.BuildResult(s.Criteria, nil), err
 	}
 
 	verdicts := make([]engine.Verdict, 0, len(all))
 	var need []source.Candidate
-	var known []engine.Verdict
 
 	for _, c := range all {
 		v, ok := s.fromCache(c)
 		if ok {
-			known = append(known, v)
+			// Nothing was fetched for it, but it still showed up in this
+			// run: the table fills while the fetch is still going.
+			verdicts = append(verdicts, v)
+			watch.judged(v)
 			continue
 		}
 		need = append(need, c)
 	}
 
-	// One fetch for everything the cache could not answer.
-	fetched := []source.Annual{}
+	// One fetch for everything the cache could not answer, judged stock by
+	// stock as each arrives.
+	//
+	// streamed records what the callback already judged: a channel that
+	// cannot stream answers with the same stocks afterwards, and judging
+	// them twice would put each one in the table twice.
+	streamed := map[string]bool{}
 	if len(need) > 0 {
 		codes := make([]string, len(need))
 		for i, c := range need {
 			codes[i] = c.Code
 		}
-		fetched, err = s.Source.Figures(ctx, s.Query(), codes, progress)
-	}
-
-	// The first pass already carries live PE and the name; the figures
-	// call answers only for what is annual.
-	cands := map[string]source.Candidate{}
-	for _, c := range need {
-		cands[c.Code] = c
+		cands := map[string]source.Candidate{}
+		for _, c := range need {
+			cands[c.Code] = c
+		}
+		_, err = s.figures(ctx, codes, func(a source.Annual) {
+			streamed[a.Code] = true
+			verdicts = append(verdicts, s.keep(a, cands[a.Code], watch))
+		}, progress)
 	}
 
 	// Candidates the channel returned without figures are reported rather
 	// than silently dropped: a refusal is a fact worth showing.
-	got := map[string]bool{}
-	for _, a := range fetched {
-		got[a.Code] = true
-		v := s.judge(a, cands[a.Code])
-		s.remember(a)
-		if a.Error != "" {
-			s.rememberFailure(a.Code, a.Error)
-		} else {
-			s.clearFailure(a.Code)
-		}
-		verdicts = append(verdicts, v)
-	}
+	//
 	// A run that stopped part-way never asked about the rest, so they are
 	// not "no data": they are simply not in this report.
 	if err == nil {
 		for _, c := range need {
-			if !got[c.Code] {
-				verdicts = append(verdicts, engine.Verdict{
+			if !streamed[c.Code] {
+				v := engine.Verdict{
 					Stock:       toStock(c),
 					Unavailable: "the channel returned no figures",
-				})
+				}
+				verdicts = append(verdicts, v)
+				watch.judged(v)
 			}
 		}
 	}
 
-	verdicts = append(verdicts, known...)
 	return engine.BuildResult(s.Criteria, verdicts), err
+}
+
+// candidates asks for the first pass, streaming it when the channel can.
+func (s Screen) candidates(ctx context.Context, watch Watch) ([]source.Candidate, error) {
+	if st, ok := s.Source.(source.Stream); ok {
+		return st.CandidatesStream(ctx, s.Query(), watch.FirstPass, watch.Progress)
+	}
+	return s.Source.Candidates(ctx, s.Query(), watch.Progress)
+}
+
+// figures asks for the annual reports, streaming them when the channel can.
+func (s Screen) figures(ctx context.Context, codes []string,
+	on func(source.Annual), progress source.Progress) ([]source.Annual, error) {
+	if st, ok := s.Source.(source.Stream); ok {
+		return st.FiguresStream(ctx, s.Query(), codes, on, progress)
+	}
+	fetched, err := s.Source.Figures(ctx, s.Query(), codes, progress)
+	for _, a := range fetched {
+		on(a)
+	}
+	return fetched, err
+}
+
+// keep judges one stock, remembers what will not change, and reports it.
+func (s Screen) keep(a source.Annual, c source.Candidate, watch Watch) engine.Verdict {
+	v := s.judge(a, c)
+	s.remember(a)
+	if a.Error != "" {
+		s.rememberFailure(a.Code, a.Error)
+	} else {
+		s.clearFailure(a.Code)
+	}
+	watch.judged(v)
+	return v
+}
+
+// judged reports a verdict if anyone is watching.
+func (w Watch) judged(v engine.Verdict) {
+	if w.Judged != nil {
+		w.Judged(v)
+	}
 }
 
 // Retry asks the channel again for one stock the run could not answer for.

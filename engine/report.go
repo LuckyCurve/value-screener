@@ -64,6 +64,27 @@ func BuildResult(c config.Criteria, verdicts []Verdict) Result {
 	return r
 }
 
+// Add puts one more verdict in the group it belongs to, keeping the groups
+// sorted. A run in flight uses it: each stock shows up as soon as it is
+// judged, rather than at the end.
+func (r *Result) Add(v Verdict) {
+	switch {
+	case v.Unavailable != "":
+		r.Missing = append(r.Missing, v)
+		sort.SliceStable(r.Missing, func(i, j int) bool {
+			return r.Missing[i].Stock.Code < r.Missing[j].Stock.Code
+		})
+	case v.Passed:
+		r.Passed = append(r.Passed, v)
+		SortPassed(r.Passed)
+	default:
+		r.Rejected = append(r.Rejected, v)
+		sort.SliceStable(r.Rejected, func(i, j int) bool {
+			return r.Rejected[i].Stock.Code < r.Rejected[j].Stock.Code
+		})
+	}
+}
+
 // Replace swaps one stock's verdict for its code, puts it in the group its
 // new verdict belongs to, and returns whether the code was found.
 func (r *Result) Replace(v Verdict) bool {
@@ -140,8 +161,48 @@ func (v Verdict) Summary() string {
 		return "rejected"
 	}
 	f := v.Failures[0]
+	line := f.Criterion + ": " + f.Reason
 	if len(f.Years) > 0 {
-		return fmt.Sprintf("%s: %s (%v)", f.Criterion, f.Reason, f.Years)
+		line += " in " + years(f.Years)
 	}
-	return fmt.Sprintf("%s: %s", f.Criterion, f.Reason)
+	// A second broken rule is worth knowing about without opening the row.
+	if len(v.Failures) > 1 {
+		line += " (+1 more)"
+	}
+	return line
+}
+
+// years names the years a failure covered, newest first, the way a person
+// reads them: "2024, 2023 and 2022", not a bracketed list.
+//
+// Past a few, the count carries the point and the list does not: a stock
+// that missed fifteen years should not print fifteen of them.
+func years(ys []int) string {
+	if len(ys) > 4 {
+		return fmt.Sprintf("%d years, %d to %d", len(ys), ys[len(ys)-1], ys[0])
+	}
+	out := make([]string, len(ys))
+	for i, y := range ys {
+		out[i] = fmt.Sprint(y)
+	}
+	switch len(out) {
+	case 0:
+		return ""
+	case 1:
+		return out[0]
+	case 2:
+		return out[0] + " and " + out[1]
+	}
+	return fmt.Sprintf("%s and %s", join(out[:len(out)-1]), out[len(out)-1])
+}
+
+func join(parts []string) string {
+	out := ""
+	for i, p := range parts {
+		if i > 0 {
+			out += ", "
+		}
+		out += p
+	}
+	return out
 }

@@ -10,6 +10,7 @@ without it installed.
 
 from __future__ import annotations
 
+import socket
 import time
 from typing import Any, Iterator
 
@@ -19,6 +20,11 @@ from .market import roe_of, sheet_for
 # The financial-statement endpoint allows 30 calls per 30 seconds. Staying a
 # little under that keeps a long run from tripping the limit.
 MIN_CALL_INTERVAL = 1.25
+
+# How long to wait for the quote port before asking the SDK to connect. The
+# SDK retries refused connections for about half a minute; a port that does
+# not answer within this is not OpenD, and a run should say so at once.
+REACH_TIMEOUT = 1.0
 
 # The SDK's success code. Mirrored here so the retry logic can be tested
 # without the futu package installed.
@@ -52,6 +58,15 @@ def _is_rate_limit(message: str) -> bool:
     return any(marker in text for marker in markers)
 
 
+def reachable(host: str, port: int, timeout: float = REACH_TIMEOUT) -> bool:
+    """Whether something is listening where OpenD should be."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 class QuoteClient:
     """Read-only access to the Futu quote API."""
 
@@ -75,6 +90,13 @@ class QuoteClient:
                 "the futu-api package is not installed; run "
                 "`pip install futu-api` in the interpreter the app uses"
             ) from exc
+        # Nothing on the port means the SDK would spin for half a minute
+        # before saying so. Say it now, in the words the window will show.
+        if not reachable(self.host, self.port):
+            raise OpenDError(
+                f"OpenD is not running on {self.host}:{self.port}; "
+                "start and log in to OpenD, then run the screen again"
+            )
         self._ctx = OpenQuoteContext(host=self.host, port=self.port)
         return self._ctx
 

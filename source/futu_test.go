@@ -2,6 +2,7 @@ package source
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -111,6 +112,73 @@ func TestQueryReachesTheDataLayer(t *testing.T) {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("the criteria file should hold %s, got %s", want, data)
 		}
+	}
+}
+
+// A stock the data layer finished reaches the caller before the run ends,
+// so the window can show it while the rest are still being fetched.
+func TestFiguresStreamReportsEachStockAsItArrives(t *testing.T) {
+	dir := t.TempDir()
+	layer := filepath.Join(dir, "layer")
+	packet := `{"stocks":[{"code":"HK.00700","roe":{"2024":0.3}},` +
+		`{"code":"HK.00005","roe":{"2024":0.2}}]}`
+	line := `{"event":"judged","stock":{"code":"HK.00700","roe":{"2024":0.3},` +
+		`"balance":{"2024":{"cash":1,"debt":0}}}}`
+	body := "echo '" + line + "' >&2\n" +
+		"printf '%s' '" + packet + "' > \"$3\"\n"
+	if runtime.GOOS == "windows" {
+		layer += ".bat"
+		body = "echo " + line + " 1>&2\r\n" +
+			"> \"%~3\" echo " + packet + "\r\n"
+	} else {
+		body = "#!/bin/sh\n" + body
+	}
+	if err := os.WriteFile(layer, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	f := Futu{Dir: dir, Binary: layer, Temp: dir}
+	var streamed []string
+	got, err := f.FiguresStream(context.Background(), Query{},
+		[]string{"HK.00700", "HK.00005"}, func(a Annual) {
+			streamed = append(streamed, a.Code)
+		}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(streamed) != 1 || streamed[0] != "HK.00700" {
+		t.Errorf("the finished stock should arrive streaming, got %v", streamed)
+	}
+	// The packet is still the authority, and holds both.
+	if len(got) != 2 {
+		t.Errorf("the packet should supply every stock, got %+v", got)
+	}
+}
+
+// A channel with nothing listening is unplugged, not broken: it says so with
+// ErrUnavailable, and keeps the log to itself.
+func TestAnUnreachableChannelReportsErrUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	layer := filepath.Join(dir, "layer")
+	body := "echo 'OpenD is not running on 127.0.0.1:11111' >&2\nexit 3\n"
+	if runtime.GOOS == "windows" {
+		layer += ".bat"
+		body = "echo OpenD is not running on 127.0.0.1:11111 1>&2\r\n" +
+			"exit /b 3\r\n"
+	} else {
+		body = "#!/bin/sh\n" + body
+	}
+	if err := os.WriteFile(layer, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	f := Futu{Dir: dir, Binary: layer, Temp: dir}
+	_, err := f.Candidates(context.Background(), Query{}, nil)
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("want ErrUnavailable, got %v", err)
+	}
+	if strings.Contains(err.Error(), "echo") {
+		t.Errorf("the log should not travel with the error: %v", err)
 	}
 }
 

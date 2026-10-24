@@ -21,8 +21,12 @@ The figures come from Futu's OpenD, which must be running and logged in on
 
 The first pass asks OpenD for candidates by PE and by the same ROE floor, over
 at most twelve years — the most its screen endpoint accepts. The per-stock pass
-then applies the rules in full, including the slack. Cancelling a run stops the
-fetch at the stock in flight and keeps the stocks already judged.
+then applies the rules in full, including the slack. Each stock appears in the
+table as it is judged, while the rest are still being fetched. Cancelling a run
+stops the fetch at the stock in flight and keeps the stocks already judged.
+
+If OpenD is not running, the window says so and shows how to start it, instead
+of waiting out the SDK's retries.
 
 OpenD cannot answer the other three criteria from the usual checklist —
 management integrity, a focused strategy, auditor and incentive design — so

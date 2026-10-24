@@ -142,10 +142,22 @@ func newScreen(c config.Criteria) (liveScreen, error) {
 	}, nil
 }
 
+// errOpenD is what the window is told when the channel could not be reached:
+// the run never began, so the answer is setup, not the rules.
+var errOpenD = errors.New("OpenD is not running")
+
+// errRunFailed is a run that stopped for a reason the user cannot act on
+// from the window. The window keeps the cause in its message but leads with
+// what to try.
+var errRunFailed = errors.New("the screen could not finish")
+
 // DefaultScreen builds the real pipeline: a Futu channel, a SQLite cache of
 // closed years, and the engine deciding. Only the source names Futu, so
 // swapping or adding a channel leaves the cache and the rules alone.
-func DefaultScreen() Screen {
+//
+// onJudged is called for each stock as it is decided, so the window fills
+// while the run is still fetching.
+func DefaultScreen(onJudged func(engine.Verdict)) Screen {
 	return func(ctx context.Context, c config.Criteria,
 		progress func(index, total int, message string)) (engine.Result, error) {
 
@@ -154,7 +166,10 @@ func DefaultScreen() Screen {
 			return engine.Result{}, err
 		}
 		defer l.close()
-		res, err := l.screen.Run(ctx, func(i, n int, msg string) { progress(i, n, msg) })
+		res, err := l.screen.Run(ctx, screener.Watch{
+			Progress: func(i, n int, msg string) { progress(i, n, msg) },
+			Judged:   onJudged,
+		})
 		// The result stands even when the run failed or was stopped: it
 		// carries every stock that was judged before that.
 		return res, dataLayerError(err)
@@ -175,10 +190,16 @@ func DefaultRetry() Retrier {
 	}
 }
 
-// dataLayerError turns a channel failure into something the user can act on.
+// dataLayerError turns a channel failure into something the user can act on,
+// in the words the window shows.
 func dataLayerError(err error) error {
-	if errors.Is(err, context.Canceled) {
+	if err == nil || errors.Is(err, context.Canceled) {
 		return err
 	}
-	return fmt.Errorf("the data layer stopped: %w", err)
+	if errors.Is(err, source.ErrUnavailable) {
+		return errOpenD
+	}
+	// The child's own words name things nobody outside the project can act
+	// on; the window's Tips page says what to do about them.
+	return errRunFailed
 }

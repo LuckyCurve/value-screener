@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,15 +17,29 @@ import (
 	"sync"
 )
 
+// Unreachable is the data layer's exit code when OpenD was not answering.
+// It is the one failure the window explains itself rather than merely
+// reporting: nothing was asked, so nothing is wrong with the rules.
+const Unreachable = 3
+
+// ErrUnreachable is returned when the data layer could not reach OpenD.
+var ErrUnreachable = errors.New("OpenD is not running")
+
 // Event is one progress line the data layer writes to stderr.
+//
+// Stocks and Stock are the two streamed lines: the first pass, and one
+// stock's report. Their shape belongs to the channel, so they stay raw here;
+// the runner carries them and does not read them.
 type Event struct {
-	Event   string `json:"event"`
-	Name    string `json:"name,omitempty"`
-	Index   int    `json:"index,omitempty"`
-	Total   int    `json:"total,omitempty"`
-	Count   int    `json:"count,omitempty"`
-	Code    string `json:"code,omitempty"`
-	Message string `json:"message,omitempty"`
+	Event   string          `json:"event"`
+	Name    string          `json:"name,omitempty"`
+	Index   int             `json:"index,omitempty"`
+	Total   int             `json:"total,omitempty"`
+	Count   int             `json:"count,omitempty"`
+	Code    string          `json:"code,omitempty"`
+	Message string          `json:"message,omitempty"`
+	Stocks  json.RawMessage `json:"stocks,omitempty"`
+	Stock   json.RawMessage `json:"stock,omitempty"`
 }
 
 // Options configure one run.
@@ -117,6 +132,9 @@ func Run(ctx context.Context, dir string, opts Options) ([]byte, error) {
 		return nil, ctx.Err()
 	}
 	if waitErr != nil {
+		if code, ok := exitCode(waitErr); ok && code == Unreachable {
+			return nil, fmt.Errorf("%w%s", ErrUnreachable, tail.suffix())
+		}
 		return nil, fmt.Errorf("data layer failed: %w%s", waitErr, tail.suffix())
 	}
 	if readErr != nil {
@@ -173,6 +191,16 @@ func scanEvents(r io.Reader, tail *tailBuffer, onEvent func(Event)) {
 			onEvent(ev)
 		}
 	}
+}
+
+// exitCode is the status a finished child exited with, if it exited on its
+// own rather than being killed.
+func exitCode(err error) (int, bool) {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode(), true
+	}
+	return 0, false
 }
 
 // resolvePython honours an explicit interpreter, then the venv in dir, then
